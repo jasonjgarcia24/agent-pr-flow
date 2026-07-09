@@ -1,0 +1,170 @@
+# Linear — PM platform workflow
+
+The platform-specific workflow reference for the **Radar** project-manager agent
+(`.claude/agents/radar.md`) and the **`/issue`** command (`.claude/commands/issue.md`).
+Radar reads this at the start of every operation; `/issue` follows the "Filing a new issue"
+section. This is the single source of truth for how issue tracking works on Linear — CLAUDE.md
+only routes here.
+
+## Platform target
+- **Team:** {{TEAM}} · **Project:** {{PROJECT}} · **Issue key:** `{{ISSUE_KEY}}-N`.
+- Drive it via the **claude.ai Linear MCP** — `{{MCP_PREFIX}}save_issue` /
+  `list_issues` / `get_issue` / `save_comment` / `list_issue_labels`. These are deferred MCP
+  tools; if one isn't loaded, fetch it first with ToolSearch (e.g.
+  `select:{{MCP_PREFIX}}save_issue,{{MCP_PREFIX}}get_issue`).
+- Division of concerns: **`docs/requirements.md` (R-IDs)** = durable behavioral spec (the source
+  of truth); **`tasks/plan.md` / `todo.md`** = task structure + status; **Linear** = transient /
+  ad-hoc items (bugs, "do later", field findings). Each issue references the relevant R-ID; the
+  closing commit cites both (e.g. `fix(ui): … (R-UX-050)\n\nFixes {{ISSUE_KEY}}-2`).
+
+## Referencing issues — `{{ISSUE_KEY}}-N` only, never GitHub `#N`
+The two numbering schemes do NOT line up and CANNOT be aligned: Linear ids are contiguous +
+immutable (no renumber feature), GitHub numbers are fixed + gappy. `{{ISSUE_KEY}}-N` is canonical
+everywhere — chat, commit messages, doc cross-refs. Do **not** write "#N = {{ISSUE_KEY}}-M" dual
+labels. Every migrated issue preserves its original GitHub `#N` as an attachment/link, so if a
+legacy `#N` ever surfaces, resolve it **once** (`get_issue` and read its attachment) and switch to
+`{{ISSUE_KEY}}-N` thereafter. Feedback-backend issues still originate on GitHub with a `#N` but
+mirror in as `{{ISSUE_KEY}}-N` — reference them by `{{ISSUE_KEY}}-N` too.
+
+## Priority — the native Linear field (NOT a label)
+Map the old `P0/P1/P2` scale (Jason's calibration 2026-07-04):
+- `2` **High** — **P0**: fix now / clear bug or gap hitting core UX.
+- `3` **Medium** — **P1**: should fix soon.
+- `4` **Low** — **P2**, the **default** for a new issue (most items are P2-equivalent).
+- `1` **Urgent** — reserved for true break-the-app emergencies (crash / data loss); rarely used.
+
+The `P0/P1/P2` *labels* are retired for new issues; they linger on migrated issues as historical
+cruft only.
+
+## Labels — type + size stay labels
+- **Type** (one or more): `bug`, `enhancement`, `documentation`, `chart`, `ui`, `design-handoff`,
+  `verification-owed`, `roadmap`. Heuristics: defect → `bug`; new behavior/affordance →
+  `enhancement`; deferred/future direction → `roadmap`; "implemented but needs an on-device /
+  real-finger check" → `verification-owed`; hero/run charts → `chart`; visual/interaction → `ui`;
+  doc work → `documentation`; implements a design handoff → `design-handoff`.
+- **Size** (exactly one, best-effort scope): `size:S` (~hours / localized), `size:M` (~1 day /
+  one subsystem), `size:L` (multi-day / new plumbing), `size:XL` (research / cross-cutting / needs
+  a design pass first).
+- **`parked`** — deferred by design, do not implement without an explicit go-ahead (pairs with
+  `roadmap`; only when Jason has said "not now").
+- **`Migrated`** marks GitHub-imported issues only — never apply it to new ones.
+- Choose from the team's EXISTING label set; reuse, don't invent (`list_issue_labels` if unsure).
+
+## States + when to transition
+States: `Backlog` · `Todo` · `In Progress` · `In Review` · `Done` · `Canceled` · `Duplicate`.
+- **`Backlog`** — deferred: `parked` (do-not-implement) OR `roadmap` / not-yet-prioritized.
+- **`Todo`** — actionable, ready, not started (the default for most new issues). A blocked-but-
+  ready issue can be Todo + a `blockedBy` relation.
+- **`In Progress`** — actively being worked (set when work genuinely starts, never speculatively).
+- **`In Review`** — implementation complete, awaiting review/verification. The trigger is the
+  **PR opening** (ADR-0023/0025): the GitHub↔Linear integration usually drives this transition
+  off the branch/PR link; Radar's pass is idempotent verification. Review itself = the tiered
+  gates (SHA-pinned Watson/Barb verdict markers on the PR — `.claude/references/pm/workflow.md` §5).
+- **`Done`** — complete/shipped. Cite `Fixes {{ISSUE_KEY}}-N` in the closing commit and let the
+  GitHub↔Linear integration auto-close on the default-branch landing; **verify it flipped**
+  (`get_issue`). The `verification-owed` **label** legitimately rides on shipped-but-unverified
+  Done issues — do not strip it when closing.
+
+  **⚠️ Setting `Done` manually on a GitHub-linked issue is NOT harmless bookkeeping — it can close
+  a real GitHub issue.** Researched + confirmed 2026-07-05: this repo's GitHub connection uses
+  **two-way** GitHub Issues Sync (Linear docs: `linear.app/docs/github` — "issues created in
+  either the GitHub repo or Linear team will create a synced copy in the other"; synced properties
+  explicitly include **Status**, in the same bucket as Labels/Assignee/Comments). We already
+  observed this bucket syncing Linear→GitHub live (label writes landing on a GitHub issue from a
+  Linear-side edit), so Status almost certainly rides the same channel. **Practical rule: only
+  hand-set `state="Done"` on an issue with a GitHub attachment (`get_issue` → check `attachments`)
+  when the work is genuinely verified complete** — treat it like closing the GitHub issue directly,
+  not like flipping an internal label. Don't use it as a casual "the integration probably missed
+  it" fallback. Issues filed straight into Linear (no GitHub attachment) have no such external
+  effect — Done is pure Linear bookkeeping for those.
+- **`Canceled`** — won't-do / not a real issue. **`Duplicate`** — confirmed dup (set `duplicateOf`).
+
+Idempotency: if an issue is already in the target state, don't re-write it — just confirm.
+
+**Which transitions are load-bearing:** the GitHub↔Linear sync mirrors GitHub-close →
+Linear-`Done` for GitHub-origin issues, so **`Done` should mostly be the integration's job**,
+driven by the real `Fixes {{ISSUE_KEY}}-N` commit closing the GitHub issue — not a manual override
+(see the two-way-sync caution above: a hand-set Done can reach out and close a real GitHub issue,
+so it's not a safe "belt-and-suspenders" default the way it once was). GitHub has NO equivalent of
+`In Progress` / `In Review`, so **those two are the transitions only Radar can drive — and the
+easiest to forget.** Treat `In Progress` as **step 0 the moment an issue is picked up** (before the
+first code edit), and fold "the board is current" into the close-out checklist next to the
+doc-walk + commit.
+
+## Filing a new issue (`/issue` playbook)
+Create with `{{MCP_PREFIX}}save_issue`, always `team="{{TEAM}}"` + `project="{{PROJECT}}"`.
+Always search first for duplicates (`list_issues` project=… query=…, a couple of keyword variants;
+`get_issue` any plausible hit). Then set:
+1. **Title** — concise + imperative, area-prefixed where it helps.
+2. **Priority** — the native field per the mapping above (default `4` Low).
+3. **Labels** — type(s) + exactly one `size:*` (+ `parked` if applicable). Never `Migrated`.
+4. **Body** (`description`, Markdown, literal newlines) — what it is; bug → observed vs expected
+   (+ repro); task → the acceptance bar. End with a `Ref:` line citing the R-ID (grep
+   `docs/requirements.md`) and/or `file:line`. The issue is the *transient* record; R-IDs are the
+   durable spec.
+5. **Relationships** — wire any relation you can already see (see below).
+6. **State** — pass `state` explicitly (Linear defaults to Backlog, usually wrong): `Todo` for
+   actionable work; `Backlog` for parked/roadmap/deferred.
+
+Duplicate handling: clear dup with nothing new → don't file, note `Duplicate of {{ISSUE_KEY}}-N`.
+Same issue + new info ("still happening", new repro) → `save_comment` on the existing one, don't
+file. Genuinely ambiguous → ask before acting.
+
+## Relationships — wire them, don't leave them implicit
+When issues relate, record a **Linear relation** via `save_issue`'s params, not just prose:
+- **`relatedTo`** — same theme/effort, or a bug + its follow-ups (symmetric, append-only).
+- **`blockedBy`** / **`blocks`** — a HARD dependency: A can't proceed or be *verified* until B
+  ships (e.g. {{ISSUE_KEY}}-107/108 `blockedBy` {{ISSUE_KEY}}-119). Append-only.
+- **`duplicateOf`** — a confirmed dup (also set state `Duplicate`).
+
+Wire relations both at filing and whenever one surfaces later (an audit, a field note, a "can't
+verify X until Y"). A `Related:` line in a body is a *hint*, not a queryable link — back it with
+the real relation.
+
+**Gotcha — you cannot relate to an ARCHIVED issue.** A relation pointing at an archived issue
+(most Done issues auto-archive) **silently no-ops** — `save_issue` returns success but nothing
+attaches. Always `get_issue … includeRelations=true` to confirm a relation stuck. If the target is
+archived: accept a plain inline body link (Linear renders `{{ISSUE_KEY}}-N` mentions as clickable)
+or un-archive the target first (rarely worth it — un-archiving reopens its state).
+
+## GitHub is retired for manual filing
+Do NOT `gh issue create` new tickets. The **feedback backend (R-FB-001..007) still files bug
+reports to GitHub** (its GitHub App / webhooks unchanged), and those mirror into Linear via the
+**GitHub↔Linear sync integration**. So GitHub is the *feedback firehose*; Linear is the human plan
+of record.
+
+## Project-hygiene sweep (do this on every board audit)
+The GitHub↔Linear sync maps a repo → **team**, NOT → **project** — so feedback-originated issues
+(the app-feedback ones, "reported via … feedback" in the body, with a GitHub attachment) land in
+the **{{TEAM}} team with NO project**, and now also in the team's **Triage** queue (enabled
+2026-07-05). Linear has no native "set project" automation (checked account + team
+`Workflows & automations` — status/close/archive only), so this is Radar's job. On any audit —
+and whenever asked to "manage triage" — sweep: `list_issues` team={{TEAM}} with **no project**
+(and/or in the **Triage** state), and for each that clearly belongs to the {{PROJECT}} app (all
+feedback-pipeline ones do): `save_issue` `project="{{PROJECT}}"` and, if it's sitting in
+**Triage**, accept it out by moving state → **Backlog**. Genuinely-ambiguous / off-project items
+stay in Triage — flag them, don't guess. (The durable fix is server-side — file to Linear's API
+with the project already set — tracked as {{ISSUE_KEY}}-131; until then this sweep is the safety
+net.)
+
+**Normalize priority + size on the way in — do NOT leave them blank.** Feedback-pipeline issues
+arrive from the GitHub App with only a bare type label (`Bug`/`enhancement`) — no native priority,
+no `size:*`. Confirmed live 2026-07-05: {{ISSUE_KEY}}-130/131/132/133 all landed with
+`priority: No priority` and no size label despite being correctly project-assigned. **Set both,
+using the same defaults and heuristics as the "Filing a new issue" section above:**
+- **Priority** — default `4` Low, unless the report clearly describes a crash / data-loss / core-flow-broken severity (then `2` High or `3` Medium per the usual mapping). Read the title + body; don't leave it at Linear's `0` No-priority default.
+- **Size** — best-effort `size:S/M/L/XL` from reading the report, same judgment call `/issue` already makes for manually-filed issues. A terse one-line ask is often `size:S`; a substantive feature request (new UI, new data flow) is `size:M`+. Don't skip sizing just because the report is short — estimate from what it's asking for, not from how long the report is.
+
+This is the same classification work `/issue` does for everything else — there's no principled
+reason feedback-pipeline issues should be less complete than manually-filed ones. Type label sync
+from GitHub is fine as-is; only priority + size need Radar's pass.
+
+## Migration note (2026-07-04, historical)
+All 116→120 GitHub issues imported into Linear via its native GitHub importer (authorship
+preserved, `Migrated` label added, open/closed → Linear state); priority converted from the `P#`
+labels to native priority (later recalibrated to P0→High / P1→Medium / P2→Low). Scope of the move
+was **human PM only** — the R-FB feedback pipeline stayed on GitHub by design; a full backend rewire
+to Linear's API was deliberately deferred. Optional cleanup still owed in the Linear UI (MCP can't
+rename/delete labels): rename default `Bug`→`bug`, delete unused `Feature`/`Improvement`, optionally
+bulk-remove the now-redundant `P#` labels, optionally enable estimates to convert `size:*` → native
+estimates.

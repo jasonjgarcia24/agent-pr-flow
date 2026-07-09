@@ -1,0 +1,169 @@
+# The Engineering Workflow — canonical reference
+
+**Scope.** This is the single source of truth for how work moves in this repo: issue → branch →
+worktree → implementation → commit → PR → gates → landing → close-out. It absorbs the CLAUDE.md
+dev-flow block, the ADR-0024 orchestrator playbook, and the review-tier policy. CLAUDE.md carries
+only a ~10-line operating card pointing here. Platform-specific tracker mechanics stay in
+`references/pm/<platform>.md` (today: `linear.md`). Decision lineage: ADR-0023 (trimmed GitHub
+Flow), ADR-0024 (parallel orchestration), ADR-0025 (mechanical gates + this consolidation,
+SAD-175).
+
+## §1 Charter
+
+- `{{DEFAULT_BRANCH}}` is **always deployable** and **PR-only** — every change lands as the squash
+  commit of a merged PR, `<PR title> (#N)`, one atomic commit per {{ISSUE_KEY}} issue.
+- Every gate that can be mechanical **is** mechanical (Claude hooks, pre-push, land-pr.sh,
+  main-guard); what stays convention is listed in §6.
+- One {{ISSUE_KEY}} issue → one branch → one worktree → one owning agent. Never two agents in one
+  working dir.
+
+## §2 The loop (per issue)
+
+1. **Pick up** — fire Radar (background) to set the {{ISSUE_KEY}} issue **In Progress** (step 0,
+   the easy-to-forget one).
+2. **Branch** — from the fresh default branch (`git.defaultBranch` in
+   workflow.config.json), named with the tracker's generated `gitBranchName`
+   so the PR auto-links.
+3. **Worktree** — one per issue (§8); copy in the gitignored per-machine files
+   (`git.copyIntoWorktree` in workflow.config.json).
+4. **Implement** — cite R-IDs in code comments/tests; new field-discovered behavior goes to
+   `docs/requirements.md`, not code comments.
+5. **Commit** — **Hubert** commits on the branch (atomic, `<type>: <subject>` ≤70 chars, cites
+   {{ISSUE_KEY}}-N; NO `Fixes` line — the PR body carries it). **Gotcha:** background Hubert can
+   stall after staging while notifying "completed" — verify `git log` shows the SHA; if stalled,
+   SendMessage-resume with "finish the commit".
+6. **Push + PR** — the owning agent pushes and opens the PR (`Fixes {{ISSUE_KEY}}-N` in the body);
+   fire Radar (background) → **In Review**.
+7. **Gates** — CI + tiered review (§5); reviewers post SHA-pinned verdict comments.
+8. **Land** — `/land <PR#>` → `tools/dev/land-pr.sh` (§6). Never raw `gh pr merge` (F1-blocked).
+9. **Close out** — the 4 surfaces (§7) + remove the worktree.
+
+## §3 Stations
+
+| Station | Agent | Does | Never does |
+|---|---|---|---|
+| PM / board | **Radar** | issue state, relationships, filing, audits — background, never gates the build | code, builds, commits |
+| Commits | **Hubert** | staging, atomic commits, history curation, secret scan | push, PR, merge, destructive ops without explicit authorization |
+| Review | **Watson** | five-axis code review → APPROVE / REQUEST_CHANGES + marker comment | deep security audits, tests, fixes |
+| Security | **Barb** | vulnerability audit → CLEARED / BLOCKED + marker comment | general quality review, fixes |
+| Tests | **Pepper** | on-demand test authoring (Prove-It) — **not a standing gate** | production code, commits |
+| Acceptance | **Negev** | browser-based end-to-end verification (browser surfaces only) | non-UI verification |
+
+**Device discipline:** never run two device-touching stations (Pepper connectedAndroidTest, Negev
+probing, install/verify flows) concurrently against one serial.
+
+## §4 Orchestrator playbook (parallel work — ADR-0024)
+
+- **The main agent orchestrates, does not implement.** Each eligible issue → its own
+  branch/worktree → one `general-purpose` implementation agent owning it end-to-end
+  (code · commit · push · PR · CI).
+- **Eligibility gate:** independent · well-specified · low-ambiguity · unblocked · not
+  fidelity-verification-bound. Ineligible work stays serialized with Jason.
+- **Partition by file ownership** so parallel PRs can't collide; sequence dependent merges by
+  `blockedBy` chains; **pre-assign** shared scarce resources (R-ID numbers, Room migration
+  versions) before fan-out.
+- **Two-tier verification:** emulator pool for FUNCTIONAL checks (each agent pinned to its own
+  `-s <serial>`); the single physical device for FIDELITY/perf (gestures, IME, scroll/ANR).
+- **The 4 adb rules:** (1) always `-s <serial>` (hook-enforced, D5); (2) per-agent host output
+  paths; (3) never `adb kill-server`/`start-server` in a pool (hook-enforced, D4); (4) one
+  shared adb daemon serves everyone.
+- **Escalate, don't guess** — open questions go to Jason; don't fan out ambiguity.
+
+## §5 Review gates + tiers
+
+**Tier resolution** (file patterns live in `.claude/workflow.config.json` — single source; the
+lists below are the semantics, not a second copy):
+
+- **security** — if ANY changed file matches `review.securityTierPatterns` (workflows, gradle,
+  manifests, network/feedback code, and the self-protection set: `.claude/settings.json`,
+  `.claude/hooks/**`, `.githooks/**`, `tools/dev/land-pr.sh`, `tools/dev/setup-repo.sh`,
+  `.mcp.json` — changing the gates requires Barb).
+- **docs** — only if ALL changed files match `review.docsTierPatterns` (`*.md`, `docs/**`,
+  `design/**`, `tasks/**`, `.gitignore`, the PR template, `acceptance-evidence/**`).
+- **code** — everything else.
+
+**Gate per tier:** docs = CI alone · code = CI + Watson · security = CI + Watson + Barb.
+
+**Verdict-comment convention** (what land-pr.sh reads): one PR issue-comment per verdict —
+line 1 is the machine marker, then a human-readable summary:
+
+```
+<!-- watson-verdict: APPROVE sha=<full 40-char headRefOid> -->     (or REQUEST_CHANGES)
+<!-- barb-verdict: CLEARED sha=<full 40-char headRefOid> -->       (or BLOCKED)
+```
+
+**SHA pinning:** any push voids prior verdicts — land-pr.sh trusts only the **last marker per
+agent** matching the **exact current head**. **Delta-review:** for a trivial follow-up push,
+the reviewer reviews the delta and re-posts a fresh marker for the new sha ("delta review:
+<what changed>; verdict unchanged").
+
+## §6 Landing
+
+The ONLY merge path is **`tools/dev/land-pr.sh <PR#>`** (via `/land`). Gates: G0 prereqs →
+G1 PR open/not-draft → G2 CI required check SUCCESS → G3 tier →
+G4 verdict markers @ head → G5 {{ISSUE_KEY}}-linkage (warn) → G6 squash-merge with explicit
+`--subject "<title> (#N)"` → G7 API-verified landed subject + `git fetch --prune` →
+G8 close-out checklist. `--dry-run` stops after G5 with a PASS/FAIL table.
+
+**Enforcement map** — what stops a bypass at each layer:
+
+| Layer | Binds | Mechanism |
+|---|---|---|
+| Claude hooks (committed `.claude/settings.json`) | every agent Bash call, all sessions/worktrees | D-rows (destructive ops) + F-rows (branch flow): F1 raw `gh pr merge`, F2 push-to-{{DEFAULT_BRANCH}} (token-wise), F3 bare push on {{DEFAULT_BRANCH}}, F4 history-writing git on {{DEFAULT_BRANCH}}, F5 {{DEFAULT_BRANCH}} deletion |
+| `.githooks/pre-push` (via `core.hooksPath`) | any local push, any terminal | rejects updates to `refs/heads/{{DEFAULT_BRANCH}}` |
+| `land-pr.sh` | the merge itself | gates G0–G7 run before the merge; its internal `gh pr merge` is invisible to the hooks (the funnel trick) |
+| `main-guard.yml` | server-side, after the fact | every commit pushed to {{DEFAULT_BRANCH}} must be the squash commit of a merged PR — red run = a bypass happened |
+
+**What stays convention (not mechanical):** verdict comments are agent-authored (spoofable in
+principle — the G8 audit URLs are the $0 mitigation); human `gh pr merge` from a terminal is
+ungated; Jason's own shells. **Escape hatches are Jason-only, ambient-env-only** —
+`SKIP_BASH_SAFETY` / `ALLOW_DESTRUCTIVE` / `ALLOW_MAIN_PUSH` / `ADB_NO_SERIAL_OK`; an inline
+`VAR=1 cmd` is blocked outright (D0) and wouldn't work anyway (hooks read their own env).
+
+**False-positive remediation:** the hook scans embedded text too (heredocs, quoted strings,
+commit messages). If a legitimate command trips a rule — e.g. authoring a doc that *mentions*
+`git push origin {{DEFAULT_BRANCH}}`, or a commit message quoting a hatch assignment — author
+the content with the **Write/Edit tools** (or `git commit -F <file>`), or reword; never bypass.
+
+## §7 Close-out — the 4 surfaces
+
+On every landing, walk exactly these four (≤2 min):
+
+1. **Linear** — fire Radar (background) to verify the {{ISSUE_KEY}} issue reached **Done** (the
+   GitHub integration usually drives it off `Fixes {{ISSUE_KEY}}-N`; Radar's pass is idempotent
+   verification).
+2. **R-ID** — update `docs/requirements.md` **iff** the change moved a quality bar or added
+   field-discovered behavior (append-only; ⛔ Retire, never renumber).
+3. **Todo snapshot** — refresh the affected line in `tasks/todo.md` (≤30-line snapshot) +
+   bump "Last refreshed".
+4. **ADR / spec-row** — **iff** architectural: ADR in `docs/decisions/` first, then a row in
+   the spec-amendments table atop the project spec (`docs/specs/`).
+
+**Explicitly retired surfaces** (do NOT maintain): plan.md checkbox ticking (frozen — Linear
+tracks open work), the todo.md prose changelog (moved to `docs/history/`), PR-template
+checkboxes (deleted — land-pr.sh checks the gates), duplicate CLAUDE.md edits (CLAUDE.md is a
+card pointing here).
+
+## §8 Worktree runbook
+
+- **Add:** `git worktree add -b <gitBranchName> <git.worktreeRoot>/<issue-slug> {{DEFAULT_BRANCH}}`
+  (`git.worktreeRoot` from workflow.config.json; or the session-native worktree tool). **One
+  agent per worktree.**
+- **Copy in** the gitignored per-machine files or the build dies early (Gradle: at
+  `processDebugGoogleServices`): e.g. `local.properties`, `app/google-services.json`, and
+  optionally `.claude/settings.local.json` (permissions allowlist → fewer prompts). List lives
+  in `git.copyIntoWorktree`.
+- The committed `.claude/settings.json` + hooks materialize automatically — safety wiring needs
+  no copy-in.
+- **Remove after landing:** `git worktree remove <path>` (+ delete the local branch; the remote
+  branch auto-deletes on merge).
+- Never bare `git stash` — worktrees share the stash stack with every other session.
+
+## §9 Config
+
+Machine-readable knobs live in **`.claude/workflow.config.json`** (SAD-181): tracker
+coordinates, default branch, merge method, required-check name, tier patterns, verdict markers,
+station agents (a `null` station disables its gate with a loud WARN), worktree copy-ins, doc
+paths. `land-pr.sh`, `pre-bash-safety.sh`, and `lint-on-edit.sh` read it with hardcoded
+fallbacks + WARN when absent. New machine? Run `tools/dev/setup-repo.sh` and follow its
+PASS/FAIL table.

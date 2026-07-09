@@ -1,0 +1,9 @@
+# OS / editor cruft — the bundle itself is pure source; nothing here is generated.
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+*.orig
+.idea/
+.vscode/

@@ -1,0 +1,57 @@
+# main-guard — server-side detector: every commit reaching main must be the
+# squash-merge commit of a merged PR (ADR-0023 / SAD-177). Detection, not
+# prevention (free-tier: no branch protection) — a red run here means someone
+# pushed to main outside the land-pr.sh funnel. Only pushed commits are checked,
+# so pre-existing history is grandfathered. Known blind spot (accepted): a
+# force-push that only REMOVES commits leaves survivors with valid provenance
+# and stays green — prevention needs branch protection (SAD-145).
+name: main-guard
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  guard:
+    name: PR-provenance guard
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      BEFORE: ${{ github.event.before }}
+      AFTER: ${{ github.event.after }}
+    steps:
+      - name: Verify pushed commits are squash-merged PR commits
+        run: |
+          set -euo pipefail
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            shas="$AFTER"   # first push edge: only the new head is checkable
+          else
+            shas=$(gh api "repos/$REPO/compare/$BEFORE...$AFTER" --paginate --jq '.commits[].sha')
+          fi
+          fail=0
+          for sha in $shas; do
+            subject=$(gh api "repos/$REPO/commits/$sha" --jq '.commit.message | split("\n")[0]')
+            if ! grep -qE '\(#[0-9]+\)$' <<<"$subject"; then
+              echo "::error::commit $sha did not land via the PR funnel — subject lacks trailing (#NN): $subject"
+              fail=1
+              continue
+            fi
+            pr=$(grep -oE '\(#[0-9]+\)$' <<<"$subject" | tr -dc '0-9')
+            info=$(gh api "repos/$REPO/pulls/$pr" --jq '{merged: .merged, sha: .merge_commit_sha}' 2>/dev/null) || {
+              echo "::error::commit $sha references PR #$pr which cannot be read"
+              fail=1
+              continue
+            }
+            merged=$(jq -r '.merged' <<<"$info")
+            merge_sha=$(jq -r '.sha' <<<"$info")
+            if [ "$merged" != "true" ] || [ "$merge_sha" != "$sha" ]; then
+              echo "::error::commit $sha claims PR #$pr, but merged=$merged merge_commit_sha=$merge_sha — hand-crafted (#NN) on a direct push?"
+              fail=1
+            fi
+          done
+          exit $fail

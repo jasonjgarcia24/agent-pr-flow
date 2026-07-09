@@ -1,0 +1,54 @@
+{
+  "tracker": {
+    "platform": "linear",
+    "mcpPrefix": "mcp__claude_ai_Linear__",
+    "team": "Sadiga",
+    "project": "Endurance Logger",
+    "issueKey": "SAD"
+  },
+  "git": {
+    "defaultBranch": "main",
+    "mergeMethod": "squash",
+    "worktreeRoot": "~/Documents/endurance-logger-worktrees",
+    "copyIntoWorktree": ["local.properties", "app/google-services.json", ".claude/settings.local.json"]
+  },
+  "ci": {
+    "requiredCheck": "Build & unit test",
+    "localGate": "JAVA_HOME=$HOME/android-studio/jbr ./gradlew assembleDebug testDebugUnitTest --no-configuration-cache",
+    "lintOnEdit": null
+  },
+  "review": {
+    "docsTierPatterns": ["*.md", "docs/**", "design/**", "tasks/**", ".gitignore",
+      ".github/pull_request_template.md", "acceptance-evidence/**"],
+    "securityTierPatterns": [".github/workflows/**", "**/*.gradle.kts", "gradle/libs.versions.toml",
+      "gradle/wrapper/**", "gradle.properties", "**/AndroidManifest.xml",
+      "app/src/main/java/com/enduranceloggr/app/network/**",
+      "app/src/main/java/com/enduranceloggr/app/feedback/**",
+      ".claude/settings.json", ".claude/hooks/**", ".claude/commands/**", ".githooks/**",
+      "tools/dev/land-pr.sh", "tools/dev/setup-repo.sh", ".mcp.json",
+      ".claude/workflow.config.json", ".claude/workflow.config.*"],
+    "verdicts": {
+      "reviewer": { "marker": "watson-verdict", "pass": "APPROVE" },
+      "security": { "marker": "barb-verdict", "pass": "CLEARED" }
+    }
+  },
+  "agents": {
+    "pm": "radar",
+    "committer": "hubert",
+    "reviewer": "watson",
+    "security": "barb",
+    "tests": "pepper",
+    "acceptance": "negev"
+  },
+  "verification": {
+    "tiers": [
+      { "name": "functional", "surface": "emulator-pool", "parallel": true },
+      { "name": "fidelity", "surface": "physical-device", "parallel": false }
+    ]
+  },
+  "docs": {
+    "todoSnapshot": "tasks/todo.md",
+    "workflowRef": ".claude/references/pm/workflow.md",
+    "historyDir": "docs/history"
+  }
+}

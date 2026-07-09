@@ -1,0 +1,15 @@
+{
+  "enabledMcpjsonServers": ["android-adb"],
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [
+        { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-bash-safety.sh\"" } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Bash", "hooks": [
+        { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/post-bash-secret-scan.sh\"" } ] },
+      { "matcher": "Edit|Write|MultiEdit", "hooks": [
+        { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/lint-on-edit.sh\"" } ] }
+    ]
+  }
+}
