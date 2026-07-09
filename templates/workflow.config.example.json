@@ -26,7 +26,7 @@
       "app/src/main/java/com/enduranceloggr/app/feedback/**",
       ".claude/settings.json", ".claude/hooks/**", ".claude/commands/**", ".githooks/**",
       "tools/dev/land-pr.sh", "tools/dev/setup-repo.sh", ".mcp.json",
-      ".claude/workflow.config.json", ".claude/workflow.config.*"],
+      ".claude/workflow.config.json", ".claude/workflow.config.**"],
     "verdicts": {
       "reviewer": { "marker": "watson-verdict", "pass": "APPROVE" },
       "security": { "marker": "barb-verdict", "pass": "CLEARED" }

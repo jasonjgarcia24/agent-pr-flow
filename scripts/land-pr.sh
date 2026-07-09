@@ -44,9 +44,13 @@ done
 
 grep -qE '^[0-9]+$' <<<"$pr" || die 0 "PR number required (got: '${pr}')"
 command -v jq >/dev/null 2>&1 || die 0 "jq missing"
-command -v gh >/dev/null 2>&1 || die 0 "gh missing"
-gh auth status >/dev/null 2>&1 || die 0 "gh not authenticated"
-REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)" || die 0 "cannot resolve repo (no origin remote?)"
+# The LAND_PR_SELFTEST classifier (tools/dev/test-land-pr.sh) needs only jq +
+# the config; skip the gh-dependent checks so it runs OFFLINE in CI (SAD-257 (c)).
+if [ "${LAND_PR_SELFTEST:-0}" != "1" ]; then
+  command -v gh >/dev/null 2>&1 || die 0 "gh missing"
+  gh auth status >/dev/null 2>&1 || die 0 "gh not authenticated"
+  REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)" || die 0 "cannot resolve repo (no origin remote?)"
+fi
 
 # ---------- config load (SAD-181) ----------
 # Real runs read the config from the TRUSTED REF — the remote default branch —
@@ -66,9 +70,13 @@ if { [ -n "${LAND_PR_CFG_OVERRIDE:-}" ] || [ "${LAND_PR_SELFTEST:-0}" = "1" ]; }
 fi
 repo_top="$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 CFG="$repo_top/.claude/workflow.config.json"
+# --dry-run AND the tier self-test read the WORKING-TREE config so a branch's
+# own config changes are exercised before commit; only a real landing reads the
+# trusted ref (SAD-257 (c): the self-test must validate the current tree, not
+# origin/main's stale config).
 if [ -n "${LAND_PR_CFG_OVERRIDE:-}" ]; then
   CFG="$LAND_PR_CFG_OVERRIDE"
-elif [ "$dry_run" != "1" ]; then
+elif [ "$dry_run" != "1" ] && [ "${LAND_PR_SELFTEST:-0}" != "1" ]; then
   # symbolic-ref returns EMPTY when origin/HEAD is unset; rev-parse --abbrev-ref
   # echoes the literal "origin/HEAD" instead, defeating the fallback (Watson).
   trusted_ref="$(git -C "$repo_top" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null)"

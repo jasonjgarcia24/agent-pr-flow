@@ -226,16 +226,45 @@ for seg in "${segments[@]}"; do
   # F1 — gh pr merge is never the path (no escape hatch); the funnel is
   # land-pr.sh. ANY explicit repo selector keeps F1 active even from another
   # repo's cwd — gh acts on the TARGET repo, not the cwd (Barb audit): -R/--repo
-  # flag, a GH_REPO/GH_HOST env assignment (checked on the RAW seg, before
-  # normalization strips it), or a PR URL argument. This deliberately over-blocks
-  # cross-repo gh-pr-merge from an EL session — the funnel discipline is the point.
-  gh_repo_selector=false
-  grep -qE '(^|[[:space:]])(-R|--repo)([[:space:]=]|$)' <<<"$mseg" && gh_repo_selector=true
-  grep -qE '(^|[[:space:]])(GH_REPO|GH_HOST)=' <<<"$seg" && gh_repo_selector=true
-  grep -qiE 'https?://[^[:space:]]+/pull/[0-9]+' <<<"$mseg" && gh_repo_selector=true
-  if { $cwd_in_project || $gh_repo_selector; } \
-     && grep -qE '^([^[:space:]]*/)?gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)' <<<"$mseg"; then
-    block F1 "not the funnel — run tools/dev/land-pr.sh <PR#> (/land); raw gh pr merge skips the gates"
+  # flag, a GH_REPO/GH_HOST env assignment or a `gh repo set-default` — the last
+  # two scanned on the WHOLE raw command ($cmd), not just this segment, so a
+  # redirect placed in a sibling segment still counts (SAD-257 (a); the split-
+  # across-two-Bash-calls case is the irreducible stateless-hook limit) — or a
+  # PR URL in the merge-target ARGUMENT position (not merely mentioned in a
+  # --body, SAD-257 (b)). Deliberately over-blocks cross-repo gh-pr-merge from
+  # an EL session — the funnel discipline is the point.
+  if grep -qE '^([^[:space:]]*/)?gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)' <<<"$mseg"; then
+    gh_repo_selector=false
+    # -R/--repo in any form, incl. gh's glued short flag -Ro/repo.
+    grep -qE '(^|[[:space:]])(-R|--repo([[:space:]=]|$))' <<<"$mseg" && gh_repo_selector=true
+    # Sibling-segment redirect via env or `gh repo set-default` — scan the whole
+    # command, DEQUOTED (so GH_"R"EPO=… can't hide it — Barb audit).
+    ncmd="${cmd//\"/}"; ncmd="${ncmd//\'/}"
+    grep -qE '(^|[[:space:]])(GH_REPO|GH_HOST)=' <<<"$ncmd" && gh_repo_selector=true
+    grep -qE '(^|[[:space:]])([^[:space:]]*/)?gh[[:space:]]+repo[[:space:]]+set-default([[:space:]]|$)' <<<"$ncmd" && gh_repo_selector=true
+    # PR URL as the merge TARGET — model gh's parser (Watson/Barb: a naive
+    # position heuristic is defeated by a value-flag decoy or a recurring
+    # `merge` word). `gh pr merge` takes exactly ONE positional: the PR
+    # selector. Walk tokens after `merge`, skip each value-taking flag's VALUE
+    # token, and test the FIRST positional only, then stop — a URL that is a
+    # --body value is skipped (preserving the (b) false-positive fix), while a
+    # URL target after any decoy flag is still caught.
+    seen_merge=false; expect_val=false
+    # shellcheck disable=SC2086 # word-splitting the match-copy into tokens is the point (set -f is on)
+    for tok in $mseg; do
+      if ! $seen_merge; then [ "$tok" = "merge" ] && seen_merge=true; continue; fi
+      if $expect_val; then expect_val=false; continue; fi
+      case "$tok" in
+        -b|--body|-t|--subject|-F|--body-file|--match-head-commit|-R|--repo|--author-email)
+          expect_val=true; continue ;;   # value is the NEXT token
+        --*=*|-*) continue ;;            # inline-value or valueless flag
+      esac
+      grep -qiE '^https?://[^[:space:]]+/pull/[0-9]+' <<<"$tok" && gh_repo_selector=true
+      break                              # only the sole PR-selector arg matters
+    done
+    if $cwd_in_project || $gh_repo_selector; then
+      block F1 "not the funnel — run tools/dev/land-pr.sh <PR#> (/land); raw gh pr merge skips the gates"
+    fi
   fi
 
   # F6 — hook-evasion signals (D0 spirit; Barb audit: --no-verify DOES skip

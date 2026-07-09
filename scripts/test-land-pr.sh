@@ -19,7 +19,8 @@ trap 'rm -f "$LIST" "$CFG_OUT" "$FB_OUT"' EXIT
   git ls-files
   printf '%s\n' app/.gitignore XAndroidManifest.xml .claude/hooksx/evil.sh \
     docsx/a.txt tools/dev/land-pr.sh.orig server/.gitignore \
-    sub/dir/gradle.properties .claude/workflow.config.json
+    sub/dir/gradle.properties .claude/workflow.config.json \
+    .claude/workflow.config.d/nested.json .claude/workflow.config.yaml
 } | sort -u > "$LIST"
 
 LAND_PR_TEST=1 LAND_PR_SELFTEST=1 tools/dev/land-pr.sh 0 < "$LIST" > "$CFG_OUT" \
@@ -38,6 +39,9 @@ fi
 grep -q "^security .claude/workflow.config.json$" "$CFG_OUT" \
   && echo "PASS  gate config classifies as security (self-protection)" \
   || { echo "FAIL  gate config must classify security"; fail=1; }
+grep -q "^security .claude/workflow.config.d/nested.json$" "$CFG_OUT" \
+  && echo "PASS  nested gate-config dir classifies as security (SAD-257 d)" \
+  || { echo "FAIL  nested gate-config dir must classify security"; fail=1; }
 grep -q "^security tools/dev/land-pr.sh$" "$CFG_OUT" \
   && echo "PASS  the funnel classifies as security" \
   || { echo "FAIL  land-pr.sh must classify security"; fail=1; }

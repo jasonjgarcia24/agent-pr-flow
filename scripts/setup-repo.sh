@@ -38,7 +38,7 @@ git config fetch.prune true && pass "fetch.prune = true" || fail "could not set 
 if git remote get-url origin >/dev/null 2>&1; then
   git remote set-head origin -a >/dev/null 2>&1 \
     && pass "origin/HEAD = $(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null)" \
-    || warn "could not set origin/HEAD (land-pr.sh falls back to the origin/<defaultBranch> tracking ref)"
+    || warn "could not set origin/HEAD (land-pr.sh then falls back to the literal origin/main tracking ref)"
 fi
 
 for f in .githooks/* .claude/hooks/*.sh tools/dev/*.sh; do

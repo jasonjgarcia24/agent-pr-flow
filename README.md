@@ -106,7 +106,7 @@ One JSON file per instance; `templates/workflow.config.example.json` is instance
 | `ci.localGate` | docs | the command an agent runs locally before pushing |
 | `ci.lintOnEdit` | **runtime** — read by `lint-on-edit.sh` | lint command run on every Edit/Write (`$FILE` = edited file); `null` = fast no-op |
 | `review.docsTierPatterns` | runtime | globs; a PR is docs-tier only if ALL files match → CI-alone gate |
-| `review.securityTierPatterns` | runtime | globs; ANY match → security tier → CI + Watson + Barb (includes the self-protection set: settings, hooks, commands, githooks, the funnel scripts, `.mcp.json`, and the workflow config itself — `.claude/workflow.config.*`) |
+| `review.securityTierPatterns` | runtime | globs; ANY match → security tier → CI + Watson + Barb (includes the self-protection set: settings, hooks, commands, githooks, the funnel scripts, `.mcp.json`, and the workflow config itself — `.claude/workflow.config.**`) |
 | `review.verdicts.reviewer` | runtime | reviewer marker + passing verdict (`watson-verdict` / `APPROVE`) |
 | `review.verdicts.security` | runtime | security marker + passing verdict (`barb-verdict` / `CLEARED`) |
 | `agents.*` | docs / runtime | station → agent name; a `null` value disables that station's gate with a **loud WARN** in land-pr.sh |
@@ -129,6 +129,19 @@ the config **overrides** every fallback, so a correctly-configured instance neve
 fallbacks only surface if an instance ships no `workflow.config.json` at all (then the bundle is
 turnkey for repos that share endurance-logger's conventions and mis-gates otherwise). The
 `.md`/`.tmpl` surfaces are fully rendered from config at install time.
+
+### Known limitation — F1 `gh pr merge` arg-grammar mirror
+
+- `pre-bash-safety.sh`'s F1 guard walks the `gh pr merge` tokens and skips each value-taking flag's
+  value so a PR URL sitting in a `--body` (etc.) isn't mistaken for the merge target. That
+  value-taking-flag list
+  (`-b|--body|-t|--subject|-F|--body-file|--match-head-commit|-R|--repo|--author-email`) is a
+  **static mirror** of `gh pr merge`'s grammar and must be updated if a future `gh` adds a
+  value-taking merge flag — otherwise the un-listed flag's value is read as a positional and can
+  over-block (fail-safe: it errs toward blocking a merge, never toward letting a raw one through).
+  Raised as a non-blocking FYI by Watson and Barb in the SAD-257 review; the bundle scripts are kept
+  **byte-identical** to the endurance-logger source, so this lives here rather than as an inline
+  code comment.
 
 ## What is mechanical vs what stays convention
 
