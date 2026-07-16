@@ -116,7 +116,13 @@ G8 close-out checklist. `--dry-run` stops after G5 with a PASS/FAIL table.
 
 **What stays convention (not mechanical):** verdict comments are agent-authored (spoofable in
 principle — the G8 audit URLs are the $0 mitigation); human `gh pr merge` from a terminal is
-ungated; Jason's own shells. **Escape hatches are Jason-only, ambient-env-only** —
+ungated; Jason's own shells; **worktree isolation** (§2's "never two agents in one working dir")
+— the F-rows guard `{{DEFAULT_BRANCH}}` only, so nothing stops a feature-branch checkout or
+commit in the shared primary checkout, which can silently retarget a concurrent session's next
+commit onto your branch (SAD-298; real near-miss 2026-07-14). Mitigated by convention only: keep
+the primary on `{{DEFAULT_BRANCH}}` (reference-only) and take a worktree per issue (§8),
+overriding any session default that says to work in place. An F6 hook row would make it
+mechanical — open decision on SAD-298. **Escape hatches are Jason-only, ambient-env-only** —
 `SKIP_BASH_SAFETY` / `ALLOW_DESTRUCTIVE` / `ALLOW_MAIN_PUSH` / `ADB_NO_SERIAL_OK`; an inline
 `VAR=1 cmd` is blocked outright (D0) and wouldn't work anyway (hooks read their own env).
 
