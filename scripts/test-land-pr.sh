@@ -19,6 +19,7 @@ trap 'rm -f "$LIST" "$CFG_OUT" "$FB_OUT"' EXIT
   git ls-files
   printf '%s\n' app/.gitignore XAndroidManifest.xml .claude/hooksx/evil.sh \
     docsx/a.txt tools/dev/land-pr.sh.orig server/.gitignore \
+    server/app/routers/feedback.py xserver/notbackend.py \
     sub/dir/gradle.properties .claude/workflow.config.json \
     .claude/workflow.config.d/nested.json .claude/workflow.config.yaml
 } | sort -u > "$LIST"
@@ -45,9 +46,16 @@ grep -q "^security .claude/workflow.config.d/nested.json$" "$CFG_OUT" \
 grep -q "^security tools/dev/land-pr.sh$" "$CFG_OUT" \
   && echo "PASS  the funnel classifies as security" \
   || { echo "FAIL  land-pr.sh must classify security"; fail=1; }
-grep -q "^docs docs/plans/SAD-175-pm-ops-cleanup.md$" "$CFG_OUT" \
+grep -q "^docs docs/requirements.md$" "$CFG_OUT" \
   && echo "PASS  a docs path classifies as docs" \
   || { echo "FAIL  docs path must classify docs"; fail=1; }
+
+grep -q "^security server/app/routers/feedback.py$" "$CFG_OUT" \
+  && echo "PASS  a server/ backend path classifies as security (SAD-285)" \
+  || { echo "FAIL  server/ backend path must classify security"; fail=1; }
+grep -q "^code xserver/notbackend.py$" "$CFG_OUT" \
+  && echo "PASS  xserver/ near-miss stays code — the ^server/ anchor holds (SAD-285)" \
+  || { echo "FAIL  xserver/ near-miss must NOT classify security"; fail=1; }
 
 echo "RESULT: $([ "$fail" = "0" ] && echo "tier classification OK" || echo "TIER CLASSIFICATION BROKEN")"
 exit "$fail"

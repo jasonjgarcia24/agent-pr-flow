@@ -172,7 +172,7 @@ SECURITY_AGENT="$(station security barb)"
 # Tier patterns (globs from config → ERE; hardcoded instance-#1 fallbacks).
 # Fallback slash-less entries use (^|/) to match the documented any-depth glob
 # semantics (Watson PR #162: nested .gitignore divergence was gate-weakening).
-tier_pat '.review.securityTierPatterns' '^\.github/workflows/|\.gradle\.kts$|^gradle/libs\.versions\.toml$|^gradle/wrapper/|(^|/)gradle\.properties$|(^|/)AndroidManifest\.xml$|^app/src/main/java/com/enduranceloggr/app/network/|^app/src/main/java/com/enduranceloggr/app/feedback/|^\.claude/settings\.json$|^\.claude/hooks/|^\.claude/commands/|^\.claude/workflow\.config\.|^\.githooks/|^tools/dev/land-pr\.sh$|^tools/dev/setup-repo\.sh$|(^|/)\.mcp\.json$'
+tier_pat '.review.securityTierPatterns' '^\.github/workflows/|\.gradle\.kts$|^gradle/libs\.versions\.toml$|^gradle/wrapper/|(^|/)gradle\.properties$|(^|/)AndroidManifest\.xml$|^app/src/main/java/com/enduranceloggr/app/network/|^app/src/main/java/com/enduranceloggr/app/feedback/|^\.claude/settings\.json$|^\.claude/hooks/|^\.claude/commands/|^\.claude/workflow\.config\.|^\.githooks/|^tools/dev/land-pr\.sh$|^tools/dev/setup-repo\.sh$|(^|/)\.mcp\.json$|^server/'
 security_pat="$TIER_PAT"
 tier_pat '.review.docsTierPatterns' '\.md$|^docs/|^design/|^tasks/|(^|/)\.gitignore$|^\.github/pull_request_template\.md$|^acceptance-evidence/'
 docs_pat="$TIER_PAT"
