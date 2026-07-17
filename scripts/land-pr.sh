@@ -375,12 +375,27 @@ if ! grep -qE "\(#$pr\)\$" <<<"$merged_subject"; then
 fi
 note "G7 PASS  merge commit ${merge_sha:0:9} subject ends (#$pr)"
 git fetch --prune origin >/dev/null 2>&1 || true
-if [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$DEFAULT_BRANCH" ]; then
-  if git merge --ff-only "origin/$DEFAULT_BRANCH" >/dev/null 2>&1; then
-    note "G7 PASS  local $DEFAULT_BRANCH fast-forwarded"
-  else
-    note "G7 WARN  local $DEFAULT_BRANCH not fast-forwarded (dirty tree?)"
-  fi
+# Sync the LOCAL default branch after the merge. It may live in a DIFFERENT
+# worktree than the one we're landing from (the common case once work happens
+# per-issue in worktrees), so resolve the worktree that actually holds
+# $DEFAULT_BRANCH instead of assuming it is the cwd. Fail-safe: fast-forward
+# ONLY, only when that worktree is CLEAN, and never touch any other branch — a
+# shared checkout may hold another session's uncommitted work.
+default_wt=""; _wt=""
+while IFS= read -r _line; do
+  case "$_line" in
+    "worktree "*) _wt="${_line#worktree }" ;;
+    "branch refs/heads/$DEFAULT_BRANCH") default_wt="$_wt"; break ;;
+  esac
+done < <(git worktree list --porcelain 2>/dev/null)
+if [ -z "$default_wt" ]; then
+  note "G7 WARN  no worktree on $DEFAULT_BRANCH — local $DEFAULT_BRANCH NOT synced (run: git -C <checkout> merge --ff-only origin/$DEFAULT_BRANCH)"
+elif [ -n "$(git -C "$default_wt" status --porcelain 2>/dev/null)" ]; then
+  note "G7 WARN  $DEFAULT_BRANCH worktree is dirty — NOT synced ($default_wt); fast-forward it manually when clean"
+elif git -C "$default_wt" merge --ff-only "origin/$DEFAULT_BRANCH" >/dev/null 2>&1; then
+  note "G7 PASS  local $DEFAULT_BRANCH fast-forwarded ($default_wt)"
+else
+  note "G7 WARN  local $DEFAULT_BRANCH NOT fast-forwarded ($default_wt) — diverged? sync manually"
 fi
 
 # ---------- G8: close-out ----------
