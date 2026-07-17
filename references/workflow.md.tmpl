@@ -6,7 +6,7 @@ dev-flow block, the ADR-0024 orchestrator playbook, and the review-tier policy. 
 only a ~10-line operating card pointing here. Platform-specific tracker mechanics stay in
 `references/pm/<platform>.md` (today: `linear.md`). Decision lineage: ADR-0023 (trimmed GitHub
 Flow), ADR-0024 (parallel orchestration), ADR-0025 (mechanical gates + this consolidation,
-SAD-175).
+SAD-175), ADR-0029 (froze the todo snapshot; close-out 4→3 surfaces).
 
 ## §1 Charter
 
@@ -36,7 +36,7 @@ SAD-175).
    fire Radar (background) → **In Review**.
 7. **Gates** — CI + tiered review (§5); reviewers post SHA-pinned verdict comments.
 8. **Land** — `/land <PR#>` → `tools/dev/land-pr.sh` (§6). Never raw `gh pr merge` (F1-blocked).
-9. **Close out** — the 4 surfaces (§7) + remove the worktree.
+9. **Close out** — the 3 surfaces (§7) + remove the worktree.
 
 ## §3 Stations
 
@@ -97,6 +97,35 @@ agent** matching the **exact current head**. **Delta-review:** for a trivial fol
 the reviewer reviews the delta and re-posts a fresh marker for the new sha ("delta review:
 <what changed>; verdict unchanged").
 
+## §5a Public-launch gate (GA)
+
+Distinct from §5's per-PR tiered gate: this fires once, at the moment a feature crosses from
+launch-solo/debug-only into public availability (a flag flip, a distribution-track change, or
+equivalent) — not per PR. A feature typically lands across many already-gated PRs before this
+moment; those merge gates verified each slice in isolation, not the assembled whole against a
+public threat model.
+
+**Required before flipping any feature to public:**
+- **Barb** — a fresh security review of the feature's CURRENT state (not its state when any
+  individual PR merged): the full attack surface, auth/consent posture, secrets handling, PII
+  minimization, and any invariants the feature depends on (e.g. "anonymous UID never linkable").
+- **Watson** — a fresh design/quality review of the same, focused on cross-cutting concerns a
+  single-PR review wouldn't catch: reconciliation logic, worker/queue reliability, and any
+  identity/leak-prevention design across the whole feature.
+- **Negev** — an acceptance pass exercising the feature end-to-end as a real user/operator would,
+  across every surface it touches (app + any external services).
+
+All three review the feature as it stands **today**, not the diff of whatever PR last touched
+it. Record each verdict as a comment on the feature's tracking issue (or the ADR that governs
+it) before the public flag flips. This is a documented convention, not (yet) mechanically
+enforced by a script the way §6's `land-pr.sh` gates are — treat it with the same seriousness
+anyway.
+
+**Reusable pattern, not feature-specific:** applies to any feature making this same solo→public
+transition. Individual tracker tickets asking "someone review X before GA" for a feature already
+covered by this gate are redundant — retire them in favor of this section, the same way other
+standing rules (e.g. §7's close-out) replace per-ticket restatements.
+
 ## §6 Landing
 
 The ONLY merge path is **`tools/dev/land-pr.sh <PR#>`** (via `/land`). Gates: G0 prereqs →
@@ -131,22 +160,21 @@ commit messages). If a legitimate command trips a rule — e.g. authoring a doc 
 `git push origin {{DEFAULT_BRANCH}}`, or a commit message quoting a hatch assignment — author
 the content with the **Write/Edit tools** (or `git commit -F <file>`), or reword; never bypass.
 
-## §7 Close-out — the 4 surfaces
+## §7 Close-out — the 3 surfaces
 
-On every landing, walk exactly these four (≤2 min):
+On every landing, walk exactly these three (≤2 min):
 
 1. **Linear** — fire Radar (background) to verify the {{ISSUE_KEY}} issue reached **Done** (the
    GitHub integration usually drives it off `Fixes {{ISSUE_KEY}}-N`; Radar's pass is idempotent
    verification).
 2. **R-ID** — update `docs/requirements.md` **iff** the change moved a quality bar or added
    field-discovered behavior (append-only; ⛔ Retire, never renumber).
-3. **Todo snapshot** — refresh the affected line in `tasks/todo.md` (≤30-line snapshot) +
-   bump "Last refreshed".
-4. **ADR / spec-row** — **iff** architectural: ADR in `docs/decisions/` first, then a row in
+3. **ADR / spec-row** — **iff** architectural: ADR in `docs/decisions/` first, then a row in
    the spec-amendments table atop the project spec (`docs/specs/`).
 
 **Explicitly retired surfaces** (do NOT maintain): plan.md checkbox ticking (frozen — Linear
-tracks open work), the todo.md prose changelog (moved to `docs/history/`), PR-template
+tracks open work), the `tasks/todo.md` snapshot itself (frozen — ADR-0029; the tracker is the
+sole live status source), the todo.md prose changelog (moved to `docs/history/`), PR-template
 checkboxes (deleted — land-pr.sh checks the gates), duplicate CLAUDE.md edits (CLAUDE.md is a
 card pointing here).
 
