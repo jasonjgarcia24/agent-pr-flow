@@ -218,6 +218,35 @@ t "F2 IFS-obfuscated push origin main blocked"  2 "git${ifsB}push origin main"
 t "non-IFS \${IF} brace NOT a separator (allowed)"        0 "gitx${nonIfs}status"
 t "identifier-extended \$IFSTOP NOT a separator (allowed)" 0 "echo ${ifsU}TOP"
 
+echo "== SAD-357: empty-expansion glue (\$1-\$9/\$@/\$*, IFS-reglue) normalized =="
+# Empty-positional params (\$1-\$9/\$@/\$*) expand to nothing at the top level and
+# are used purely to glue a keyword to an adjacent token; the hook space-pads them
+# AND reorders the IFS collapse BEFORE the dequote so the D/F anchors still match
+# (Barb audit, PR #263 / SAD-258). Payloads assembled at runtime as above.
+p9='$9'; pAt='$@'; p9b='${9}'; d0='$0'; ifsSub='${IFS:0:1}'
+t "D1 IFS+\$9 glue reset --hard blocked"     2 "git${ifsU}${p9}reset --hard"
+t "D1 braced-IFS+\$9 glue blocked"           2 "git${ifsB}${p9}reset --hard"
+t "D1 IFS + empty-quote reglue blocked"      2 "git${ifsU}\"\"reset --hard"
+t "D1 bare \$9 positional glue blocked"      2 "git ${p9}reset --hard"
+t "D1 \$@ positional glue blocked"           2 "git ${pAt}reset --hard"
+t "D1 braced \${9} glue blocked"             2 "git ${p9b}reset --hard"
+t "D1 IFS substring :0:1 form blocked"       2 "git${ifsSub}reset --hard"
+t "F1 IFS+\$9 gh pr merge glue blocked"      2 "gh${ifsU}${p9}pr${ifsU}${p9}merge 5 --squash"
+# Specificity / no-false-positive: \$0 is the shell name (non-empty) so NOT glue,
+# and a benign command carrying \$@ must still pass.
+t "\$0 (non-empty) not treated as glue"      0 "echo ${d0}x"
+t "benign \$@ forward not blocked"           0 "bash script.sh ${pAt}"
+# Watson (SAD-357): a leading QUOTED empty-expansion collapses to a leading space
+# only AFTER dequote, so the trim runs post-dequote or the ^...git/^...gh anchor is
+# defeated. Plus explicit coverage for \$*, braced \${@}, and low-boundary \$1.
+qAt='"$@"'; q9='"$9"'; pStar='$*'; pAtB='${@}'; p1='$1'
+t "D1 leading quoted \$@ glue blocked"        2 "${qAt}git reset --hard"
+t "D1 leading quoted \$9 glue blocked"        2 "${q9}git reset --hard"
+t "F1 leading quoted \$@ gh pr merge blocked" 2 "${qAt}gh pr merge 5 --squash"
+t "D1 \$* positional glue blocked"            2 "git ${pStar}reset --hard"
+t "D1 braced \${@} glue blocked"              2 "git ${pAtB}reset --hard"
+t "D1 \$1 low-boundary glue blocked"          2 "git ${p1}reset --hard"
+
 echo "== jq fail-closed =="
 out=$(mk 'echo hi' | env PATH=/nonexistent /bin/bash "$H/pre-bash-safety.sh" 2>&1); rc=$?
 if [ "$rc" = "2" ]; then echo "PASS  jq missing fails closed (rc=2)"; pass=$((pass+1)); else echo "FAIL  jq missing (rc=$rc) :: $out"; fail=$((fail+1)); fi

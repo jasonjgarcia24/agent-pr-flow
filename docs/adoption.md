@@ -147,11 +147,13 @@ No uninstaller ships; removal is the mirror image of install:
   value-taking merge flag (otherwise it over-blocks — fail-safe, never toward letting a raw merge
   through).
 - **Whitespace-obfuscation evasion.** The common shell field-separator forms (`${IFS}`, its
-  `%`-suffix parameter-expansion variant, and the unbraced `$IFS`) are normalized to a space before
-  the rules run, so those specific tricks no longer slip the Bash gate (SAD-258). Arbitrary
-  obfuscation beyond those forms — or simply splitting a command across two separate Bash calls —
-  remains the accepted threat boundary: a determined agent is out of scope by design, and
-  `main-guard` is the server-side backstop. See the threat model in
+  `%`-suffix parameter-expansion variant, and the unbraced `$IFS`) **and empty-expansion glue**
+  (empty-positional params `$1`–`$9`/`$@`/`$*` used to join a keyword to an adjacent token, including
+  an `$IFS` re-glued through an empty quote) are normalized to a space before the rules run, so those
+  specific tricks no longer slip the Bash gate (SAD-258, SAD-357). Arbitrary obfuscation beyond these
+  forms — or simply splitting a command across two separate Bash calls — remains the accepted threat
+  boundary: a determined agent is out of scope by design, and `main-guard` is the server-side
+  backstop. See the threat model in
   [architecture.md](architecture.md#threat-model--what-this-defends-against).
 - **In-tree git hooks + untrusted branches.** `setup-repo.sh` points `core.hooksPath` at the
   in-tree `.githooks/` directory, so whatever `pre-push` exists on the *currently checked-out

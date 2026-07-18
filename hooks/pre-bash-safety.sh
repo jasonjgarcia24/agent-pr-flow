@@ -103,21 +103,36 @@ for seg in "${segments[@]}"; do
     block D0 "inline escape-hatch / test-seam assignment — these are Jason-only AMBIENT env (set in the shell that launched Claude), never in a command"
   fi
 
-  # Normalized match-copy: dequote, then strip wrapper prefixes and leading
-  # VAR=val assignments. All rules below match against $mseg; $seg is only
-  # for display.
-  mseg="${seg//\"/}"
+  # Normalized match-copy: normalize runtime-vanishing obfuscation, THEN dequote,
+  # then strip wrapper prefixes and leading VAR=val assignments. All rules below
+  # match against $mseg; $seg is only for display.
+  #
+  # SAD-258/357 — normalize obfuscation that vanishes at runtime BEFORE the
+  # dequote + strip, so a keyword can't hide behind a non-space boundary the D/F
+  # [[:space:]] anchors miss. Runs on the raw segment (pre-dequote) so an $IFS
+  # re-glued via an adjacent empty quote still collapses (SAD-357).
+  #   1. $IFS field-separator forms -> one space: braced ${IFS} incl. any suffix
+  #      (${IFS%??}, ${IFS:0:1}), and unbraced $IFS when NOT followed by an
+  #      identifier char (so a real var like $IFSTOP is spared; the *braced* form
+  #      always collapses). Assumes runtime IFS is default whitespace — a
+  #      redefined IFS diverges (the same stateless-hook limit accepted for F1).
+  #   2. Empty-positional glue ($1-$9, $@, $*, and braced ${1}-${9}/${@}/${*})
+  #      -> one space: these expand to nothing at the top level and are used
+  #      purely to glue a keyword to an adjacent token (SAD-357). NOT $0/$#/$$
+  #      (non-empty), and NOT ${IFS}/${HOME}-style named expansions (handled or
+  #      needed elsewhere — e.g. D3's $HOME targets).
+  # Fail-safe: only ever INSERTS boundaries -> can expose a hidden keyword, never
+  # hide one; over-blocks only when the surrounding tokens already spell a blocked
+  # command. Obfuscation beyond these forms stays the accepted boundary
+  # (ADR-0025 Risk 3; main-guard backstops the F-rows server-side).
+  mseg="$(sed -E 's/\$\{IFS[^}]*\}/ /g; s/\$IFS([^A-Za-z0-9_]|$)/ \1/g; s/\$\{[1-9@*]\}/ /g; s/\$[1-9@*]/ /g' <<<"$seg")"
+  mseg="${mseg//\"/}"
   mseg="${mseg//\'/}"
-  # SAD-258 — collapse shell field-separator ($IFS) expansions to a single
-  # space, so tokens joined by ${IFS} instead of whitespace (bash word-splits
-  # that at runtime; this hook sees the literal characters) can't dodge the
-  # [[:space:]] anchors every D/F rule relies on. Covers the braced form, the
-  # %-suffix parameter-expansion variant, and the unbraced form (the last only
-  # when NOT followed by an identifier char, so a real variable like $IFSTOP is
-  # left intact). Runs before the wrapper strip so an obfuscated sudo/env
-  # wrapper still anchors; trims any leading space the collapse introduces so
-  # the leading ^...git anchors keep matching.
-  mseg="$(sed -E 's/\$\{IFS[^}]*\}/ /g; s/\$IFS([^A-Za-z0-9_]|$)/ \1/g; s/^[[:space:]]+//' <<<"$mseg")"
+  # Trim leading whitespace AFTER the dequote, not before: a leading QUOTED empty
+  # expansion ("$@"git ...) collapses to quote+space that becomes a bare leading
+  # space only once the quotes are stripped — trimming pre-dequote left that space
+  # to defeat the ^...git / ^...gh anchors (Watson, SAD-357).
+  mseg="$(sed -E 's/^[[:space:]]+//' <<<"$mseg")"
   # Wrapper flags with values (sudo -u jason git ...) defeat the prefix strip —
   # recover the git command from the last standalone `git` token (Watson probe).
   # Runs BEFORE the strip so the wrapper word is still present to anchor on.
