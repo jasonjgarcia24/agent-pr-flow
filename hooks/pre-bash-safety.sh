@@ -108,6 +108,16 @@ for seg in "${segments[@]}"; do
   # for display.
   mseg="${seg//\"/}"
   mseg="${mseg//\'/}"
+  # SAD-258 — collapse shell field-separator ($IFS) expansions to a single
+  # space, so tokens joined by ${IFS} instead of whitespace (bash word-splits
+  # that at runtime; this hook sees the literal characters) can't dodge the
+  # [[:space:]] anchors every D/F rule relies on. Covers the braced form, the
+  # %-suffix parameter-expansion variant, and the unbraced form (the last only
+  # when NOT followed by an identifier char, so a real variable like $IFSTOP is
+  # left intact). Runs before the wrapper strip so an obfuscated sudo/env
+  # wrapper still anchors; trims any leading space the collapse introduces so
+  # the leading ^...git anchors keep matching.
+  mseg="$(sed -E 's/\$\{IFS[^}]*\}/ /g; s/\$IFS([^A-Za-z0-9_]|$)/ \1/g; s/^[[:space:]]+//' <<<"$mseg")"
   # Wrapper flags with values (sudo -u jason git ...) defeat the prefix strip —
   # recover the git command from the last standalone `git` token (Watson probe).
   # Runs BEFORE the strip so the wrapper word is still present to anchor on.
@@ -254,6 +264,11 @@ for seg in "${segments[@]}"; do
     for tok in $mseg; do
       if ! $seen_merge; then [ "$tok" = "merge" ] && seen_merge=true; continue; fi
       if $expect_val; then expect_val=false; continue; fi
+      # SAD-258 — this value-taking-flag list is a STATIC MIRROR of gh pr merge's
+      # grammar; a future gh that adds a value-taking merge flag must be added
+      # here, or F1 over-blocks a URL that follows it (fail-safe — never toward
+      # letting a raw merge through). Recheck against `gh pr merge --help` on gh
+      # version bumps.
       case "$tok" in
         -b|--body|-t|--subject|-F|--body-file|--match-head-commit|-R|--repo|--author-email)
           expect_val=true; continue ;;   # value is the NEXT token

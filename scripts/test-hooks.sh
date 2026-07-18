@@ -199,6 +199,25 @@ t "F6 --get read exempt"             0 'git config --get core.hooksPath'
 t "F6 case-insensitive hookspath"    2 'git config core.hookspath /tmp/x'
 rm -rf "$TMPMAIN" "$TMPFEAT"
 
+echo "== SAD-258: shell field-separator (\$IFS) obfuscation normalized before rules =="
+# Assemble the $IFS token forms at runtime (single-quoted = literal expansion
+# text) so these obfuscated payloads never appear verbatim in this source file.
+# The hook must collapse each to a single space before the D/F rules run, so the
+# command anchors match despite the missing literal whitespace between tokens.
+ifsB='${IFS}'; ifsU='$IFS'; ifsS='${IFS%??}'; nonIfs='${IF}'
+t "D1 IFS-braced reset --hard blocked"          2 "git${ifsB}reset --hard"
+t "D1 IFS-unbraced reset --hard blocked"        2 "git${ifsU} reset --hard"
+t "D1 IFS-suffix reset --hard blocked"          2 "git${ifsS}reset --hard"
+t "D1 leading-IFS reset --hard blocked"         2 "${ifsB}git reset --hard"
+t "D1 IFS-obfuscated sudo wrapper blocked"      2 "sudo${ifsB}git${ifsB}reset --hard"
+t "D5 IFS-obfuscated serial-less adb blocked"   2 "adb${ifsB}shell ls /sdcard"
+t "F1 IFS-obfuscated gh pr merge blocked"       2 "gh${ifsB}pr${ifsB}merge 5 --squash"
+t "F2 IFS-obfuscated push origin main blocked"  2 "git${ifsB}push origin main"
+# Specificity: a non-IFS \${IF} brace and an identifier-extended \$IFSTOP are NOT
+# field separators; leaving them intact must not turn a benign line into a match.
+t "non-IFS \${IF} brace NOT a separator (allowed)"        0 "gitx${nonIfs}status"
+t "identifier-extended \$IFSTOP NOT a separator (allowed)" 0 "echo ${ifsU}TOP"
+
 echo "== jq fail-closed =="
 out=$(mk 'echo hi' | env PATH=/nonexistent /bin/bash "$H/pre-bash-safety.sh" 2>&1); rc=$?
 if [ "$rc" = "2" ]; then echo "PASS  jq missing fails closed (rc=2)"; pass=$((pass+1)); else echo "FAIL  jq missing (rc=$rc) :: $out"; fail=$((fail+1)); fi

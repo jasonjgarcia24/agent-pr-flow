@@ -146,9 +146,12 @@ No uninstaller ships; removal is the mirror image of install:
   flag list is a static mirror of `gh`'s grammar and must be updated if a future `gh` adds a
   value-taking merge flag (otherwise it over-blocks — fail-safe, never toward letting a raw merge
   through).
-- **Whitespace-obfuscation evasion.** A determined agent can obfuscate a command (e.g. shell
-  variable expansion between tokens) to slip a client-side hook. This is the accepted threat
-  boundary — `main-guard` is the server-side backstop. See the threat model in
+- **Whitespace-obfuscation evasion.** The common shell field-separator forms (`${IFS}`, its
+  `%`-suffix parameter-expansion variant, and the unbraced `$IFS`) are normalized to a space before
+  the rules run, so those specific tricks no longer slip the Bash gate (SAD-258). Arbitrary
+  obfuscation beyond those forms — or simply splitting a command across two separate Bash calls —
+  remains the accepted threat boundary: a determined agent is out of scope by design, and
+  `main-guard` is the server-side backstop. See the threat model in
   [architecture.md](architecture.md#threat-model--what-this-defends-against).
 - **In-tree git hooks + untrusted branches.** `setup-repo.sh` points `core.hooksPath` at the
   in-tree `.githooks/` directory, so whatever `pre-push` exists on the *currently checked-out
