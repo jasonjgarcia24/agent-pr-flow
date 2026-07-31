@@ -99,7 +99,7 @@ for seg in "${segments[@]}"; do
   # D0 — inline escape-hatch assignment (checked on the RAW segment, before
   # normalization strips assignments). It would not work anyway — the hook
   # reads ambient env — so an attempt only signals evasion; block it loudly.
-  if grep -qE '(^|[[:space:]])(SKIP_BASH_SAFETY|ALLOW_DESTRUCTIVE|ALLOW_MAIN_PUSH|ALLOW_DISABLED_STATION|ADB_NO_SERIAL_OK|LAND_PR_CFG_OVERRIDE|LAND_PR_SELFTEST|LAND_PR_TEST)=' <<<"$seg"; then
+  if grep -qE '(^|[[:space:]])(SKIP_BASH_SAFETY|ALLOW_DESTRUCTIVE|ALLOW_MAIN_PUSH|ALLOW_DISABLED_STATION|ADB_NO_SERIAL_OK|LAND_PR_CFG_OVERRIDE|LAND_PR_SELFTEST|LAND_PR_SADTEST|LAND_PR_TEST)=' <<<"$seg"; then
     block D0 "inline escape-hatch / test-seam assignment — these are Jason-only AMBIENT env (set in the shell that launched Claude), never in a command"
   fi
 
