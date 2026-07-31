@@ -44,9 +44,10 @@ done
 
 grep -qE '^[0-9]+$' <<<"$pr" || die 0 "PR number required (got: '${pr}')"
 command -v jq >/dev/null 2>&1 || die 0 "jq missing"
-# The LAND_PR_SELFTEST classifier (tools/dev/test-land-pr.sh) needs only jq +
-# the config; skip the gh-dependent checks so it runs OFFLINE in CI (SAD-257 (c)).
-if [ "${LAND_PR_SELFTEST:-0}" != "1" ]; then
+# The LAND_PR_SELFTEST classifier and the LAND_PR_SADTEST picker
+# (tools/dev/test-land-pr.sh) need only jq + the config; skip the gh-dependent
+# checks so they run OFFLINE in CI (SAD-257 (c), SAD-538).
+if [ "${LAND_PR_SELFTEST:-0}" != "1" ] && [ "${LAND_PR_SADTEST:-0}" != "1" ]; then
   command -v gh >/dev/null 2>&1 || die 0 "gh missing"
   gh auth status >/dev/null 2>&1 || die 0 "gh not authenticated"
   REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)" || die 0 "cannot resolve repo (no origin remote?)"
@@ -68,6 +69,84 @@ if { [ -n "${LAND_PR_CFG_OVERRIDE:-}" ] || [ "${LAND_PR_SELFTEST:-0}" = "1" ]; }
    && [ "$dry_run" != "1" ] && [ "${LAND_PR_TEST:-0}" != "1" ]; then
   die 0 "LAND_PR_CFG_OVERRIDE/LAND_PR_SELFTEST are test-only — a real landing refuses them (set LAND_PR_TEST=1 for tests)"
 fi
+# LAND_PR_SADTEST is held to a STRICTER bar than its sibling seams: it
+# short-circuits to a pure-function probe and exits 0 without evaluating a single
+# gate, so --dry-run is NOT acceptable authorization for it. A dry run is an
+# ATTESTATION surface — `LAND_PR_SADTEST=1 land-pr.sh <N> --dry-run` would report
+# success where the genuine dry run reports BLOCKED. Requiring LAND_PR_TEST=1
+# (which pre-bash-safety.sh D0 refuses inline) keeps the seam unreachable without
+# tripping the hook. Barb MEDIUM / Watson Important, PR #399.
+if [ "${LAND_PR_SADTEST:-0}" = "1" ] && [ "${LAND_PR_TEST:-0}" != "1" ]; then
+  die 0 "LAND_PR_SADTEST is test-only and skips every gate — a real run refuses it (set LAND_PR_TEST=1 for tests)"
+fi
+
+# ---------- SAD issue resolution (SAD-538) ----------
+# G8's close-out names the issue(s) a PR CLOSES, so it must read the `Fixes
+# SAD-N` anchor — NOT the first SAD-N appearing anywhere in the title/body.
+# The project's PR convention cites related issues as background ABOVE the
+# closing line (R-ID lineage, "same defect class as SAD-N", "supersedes the
+# first bullet of SAD-N"), while `Fixes SAD-N` sits at the very bottom — so
+# first-match systematically named a RELATED issue instead of the closed one.
+# It fired on 4/4 landings in a single session (2026-07-30, PRs
+# #384/#388/#390/#392); three named already-Done issues (silent no-op), the
+# fourth named SAD-488, which was actively In Progress. Nothing automated acts
+# on the hint today, but it instructs a human or an agent to mark the wrong
+# issue complete — a wrong-issue state write.
+#
+# Keywords mirror GitHub's closing set (close/closes/closed, fix/fixes/fixed,
+# resolve/resolves/resolved), optional colon, case-insensitive, `\b`-anchored so
+# "prefixes SAD-1" is not read as a closing anchor.
+
+# Canonical, de-duplicated, order-preserving SAD-N anchors from stdin.
+_sad_anchor_ids() {
+  grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*:?[[:space:]]+SAD-[0-9]+' \
+    | grep -oiE 'SAD-[0-9]+' \
+    | tr '[:lower:]' '[:upper:]' \
+    | awk '!seen[$0]++'
+}
+
+sad_pick=""      # space-separated SAD-N list (empty when the text carries none)
+sad_how=""       # anchor | fallback | none — provenance, printed at G8
+resolve_sad() {  # $1 = PR title, $2 = PR body; sets sad_pick / sad_how
+  local ids id
+  # BODY FIRST, title only as a second pass. GitHub and Linear scan the two
+  # fields SEPARATELY and the closing convention puts `Fixes SAD-N` at the body's
+  # tail, so a keyword-shaped TITLE ("fix: SAD-100 regresses the ring") must not
+  # outrank a real body anchor. Joining the two would also manufacture a spurious
+  # anchor across the boundary — "…quick fix" + a body opening "SAD-367 …" reads
+  # as "fix SAD-367". Watson Important / Barb LOW, PR #399.
+  ids="$(_sad_anchor_ids <<<"$2")"
+  [ -n "$ids" ] || ids="$(_sad_anchor_ids <<<"$1")"
+  sad_pick=""
+  if [ -n "$ids" ]; then
+    # ALL anchors, not just the first: 2 of the last 60 PRs closed two issues
+    # (#368 → SAD-480/481, #360 → SAD-473/476), and naming only the first
+    # silently skips the other's close-out. Watson Important, PR #399.
+    while IFS= read -r id; do
+      [ -n "$id" ] && sad_pick="${sad_pick:+$sad_pick }$id"
+    done <<<"$ids"
+    sad_how="anchor"
+    return 0
+  fi
+  # No anchor anywhere → first-match over both fields, so anchorless and legacy
+  # PRs still resolve. Newline-joined, never space-joined (see above).
+  sad_pick="$(printf '%s\n%s\n' "$1" "$2" \
+    | grep -oiE '\bSAD-[0-9]+' | tr '[:lower:]' '[:upper:]' | head -1)"
+  if [ -n "$sad_pick" ]; then sad_how="fallback"; else sad_how="none"; fi
+}
+
+# Hidden picker self-test (tools/dev/test-land-pr.sh): stdin line 1 is the PR
+# title and the remaining lines are the body — mirroring the two separate fields
+# the real G8 call passes. Resolves and exits; no PR is read or touched, and no
+# config is needed, so it runs offline.
+if [ "${LAND_PR_SADTEST:-0}" = "1" ]; then
+  IFS= read -r _sad_t || _sad_t=""
+  _sad_b="$(cat)"
+  resolve_sad "$_sad_t" "$_sad_b"
+  echo "${sad_how}${sad_pick:+ $sad_pick}"
+  exit 0
+fi
+
 repo_top="$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 CFG="$repo_top/.claude/workflow.config.json"
 # --dry-run AND the tier self-test read the WORKING-TREE config so a branch's
@@ -399,13 +478,21 @@ else
 fi
 
 # ---------- G8: close-out ----------
-sad="$(grep -oE 'SAD-[0-9]+' <<<"$title $body" | head -1)"
+# Title and body stay SEPARATE arguments — see resolve_sad's contract.
+resolve_sad "$title" "$body"
+case "$sad_how" in
+  anchor)   sad_note="(from the Fixes/Closes anchor)" ;;
+  fallback) sad_note="(NO Fixes/Closes anchor in the title/body — first SAD-N match; VERIFY this is the issue the PR closes)" ;;
+  *)        sad_note="(no SAD-N in the title/body — resolve it by hand)" ;;
+esac
+case "$sad_pick" in *\ *) sad_note="$sad_note — this PR closes SEVERAL issues; verify EACH" ;; esac
 echo ""
 echo "land-pr: PR #$pr LANDED — merge commit ${merge_sha:0:9}"
 printf '%b' "$gate_rows"
 echo ""
 echo "CLOSE-OUT (3 surfaces — see .claude/references/pm/workflow.md §7):"
-echo "  1. Linear: fire Radar to verify ${sad:-<SAD-N>} -> Done (idempotent; integration usually does it)"
+echo "  1. Linear: fire Radar to verify ${sad_pick:-<SAD-N>} -> Done (idempotent; integration usually does it)"
+echo "     ^ $sad_note"
 echo "  2. R-ID: update docs/requirements.md IFF this change moved a quality bar"
 echo "  3. ADR/spec-row: IFF architectural (docs/decisions/ + spec amendments table)"
 echo "  Worktree: git worktree remove <path> once done with the branch"
