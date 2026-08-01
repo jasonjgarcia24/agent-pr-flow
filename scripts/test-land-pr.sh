@@ -129,7 +129,24 @@ sad_case "non-ASCII digits are not a SAD id (fullwidth)" "none" "t" \
 # Guards the OTHER direction: goes RED the moment anyone pins the ranges with
 # LC_ALL=C instead, because that changes LC_CTYPE too and "präfixes" would then
 # read as a closing anchor — reopening the exact wrong-issue write \b closes.
-sad_case "'präfixes SAD-N' is NOT an anchor either (\\b needs LC_CTYPE)" "fallback SAD-7" "t" \
+#
+# Run with a HOSTILE locale on purpose. Asserting this under the developer's
+# ambient en_US.UTF-8 only proves the property in a friendly environment: before
+# land-pr.sh pinned LC_CTYPE, this exact case failed on UNCHANGED code under
+# LC_ALL=C / LANG=C / LC_CTYPE=C — a false RED for anyone running the harness
+# from a bare container or stripped CI shell, and a live false anchor in
+# production for the same callers. LC_ALL=C is the strongest form: it outranks
+# LC_CTYPE, so it also proves the pin's `unset LC_ALL` is doing its job.
+# Watson Important, PR #399 / SAD-551.
+sad_case_hostile() { # $1 = label, $2 = expected, $3 = title, $4 = body
+  local got
+  got="$(LC_ALL=C LAND_PR_TEST=1 LAND_PR_SADTEST=1 tools/dev/land-pr.sh 0 <<<"$3
+$4")"
+  [ "$got" = "$2" ] \
+    && echo "PASS  $1" \
+    || { echo "FAIL  $1 — expected '$2', got '$got'"; fail=1; }
+}
+sad_case_hostile "'präfixes SAD-N' is NOT an anchor even under LC_ALL=C" "fallback SAD-7" "t" \
   "$(printf 'pr\xc3\xa4fixes SAD-7\n')"
 
 # ---------- picker seam: unterminated stdin (SAD-551) ----------

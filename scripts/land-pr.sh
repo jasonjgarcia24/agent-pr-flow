@@ -27,6 +27,33 @@
 
 set -u
 
+# ---------- locale: pin the CTYPE, deliberately not the collation ----------
+# `\b` is an LC_CTYPE predicate, and this script inherits the caller's locale.
+# Under a C ctype a non-ASCII byte stops counting as a word character, so the
+# G8 anchor guard's word boundary fires MID-WORD and "präfixes SAD-7" resolves
+# as a closing anchor — a wrong-issue write, live in production for any caller
+# with a stripped environment (bare container, systemd unit, CI shell with no
+# LANG). Verified on glibc 2.39: LC_ALL=C, LANG=C and LC_CTYPE=C all reproduce.
+#
+# C.UTF-8, NEVER C — C.UTF-8 keeps a UTF-8 ctype; C is what widens \b.
+#
+# The `unset LC_ALL` is load-bearing and NOT optional: LC_ALL OUTRANKS LC_CTYPE,
+# so `export LC_CTYPE=C.UTF-8` alone is silently defeated by an inherited
+# LC_ALL=C — which is the most likely hostile case, since LC_ALL=C is the
+# canonical way a script or CI job strips locale. Verified: with LC_ALL=C in the
+# environment, the ctype-only form still yields the false anchor.
+#
+# LC_COLLATE is left to the caller ON PURPOSE. Pinning it too (LC_ALL=C.UTF-8)
+# would also mask the `grep -o` range-extent defect, which would make the
+# enumerated digit classes below look redundant and invite their removal — the
+# enumeration is the load-bearing fix for that half and must stay so. There are
+# no collation-dependent operations (no sort/uniq/[[ < ]]) in this script.
+# Watson Important, PR #399 / SAD-551.
+if [ "$(LC_ALL=C.UTF-8 locale charmap 2>/dev/null)" = "UTF-8" ]; then
+  unset LC_ALL
+  export LC_CTYPE=C.UTF-8
+fi
+
 # ---------- G0: prereqs ----------
 die() { echo "land-pr [G$1]: FAIL — $2" >&2; exit 1; }
 
