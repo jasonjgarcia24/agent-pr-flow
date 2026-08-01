@@ -76,10 +76,17 @@ lists below are the semantics, not a second copy):
 
 - **security** — if ANY changed file matches `review.securityTierPatterns` (workflows, gradle,
   manifests, network/feedback code, and the self-protection set: `.claude/settings.json`,
-  `.claude/hooks/**`, `.githooks/**`, `tools/dev/land-pr.sh`, `tools/dev/setup-repo.sh`,
-  `.mcp.json`, plus the `.claude/commands/` entries that destroy data or drive the gate —
-  `land.md`, `issue.md`, `restore-synthetic.md`, `prune-worktrees.md` (SAD-546); every other
-  command file stays docs-tier — changing the gates requires Barb).
+  `.claude/hooks/**`, `.claude/commands/**`, `.claude/agents/**`, `.claude/workflow.config.json`,
+  `.claude/workflow.config.**`, `.githooks/**`, `tools/dev/land-pr.sh`, `tools/dev/setup-repo.sh`,
+  `.mcp.json` — changing the gates requires Barb). Commands and agent charters are gated as **whole directories** (SAD-546):
+  a filename allowlist is defeated by a rename, a sibling, a namespaced path, or a newly added
+  destructive command, because the residual tier of those directories is `docs`.
+
+  > **SAD-285 lockstep.** This paragraph, `.claude/workflow.config.json`, the hardcoded fallback
+  > in `tools/dev/land-pr.sh`, and the bundle's `templates/workflow.config.example.json` all state
+  > this same rule and **must be edited together**. `tools/dev/test-land-pr.sh` asserts both the
+  > config-vs-fallback identity and that this paragraph names every `.claude/` security pattern —
+  > it went red on this paragraph once already.
 - **docs** — only if ALL changed files match `review.docsTierPatterns` (`*.md`, `docs/**`,
   `design/**`, `tasks/**`, `.gitignore`, the PR template, `acceptance-evidence/**`).
 - **code** — everything else.

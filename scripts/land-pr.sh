@@ -325,16 +325,34 @@ SECURITY_AGENT="$(station security barb)"
 # Fallback slash-less entries use (^|/) to match the documented any-depth glob
 # semantics (Watson PR #162: nested .gitignore divergence was gate-weakening).
 #
-# .claude/commands/ is a FOUR-path security set, not the whole directory
-# (SAD-546). The rule is "commands that can destroy data or drive the gate":
-# land.md drives this funnel; issue.md carries the SAD-340/348 property that
-# /issue must only ever spawn the tool-contained radar, because its brief holds
-# untrusted item text; restore-synthetic.md and prune-worktrees.md each delete
-# real data (a device DB / a worktree). Everything else under .claude/commands/
-# stays docs-tier under the standing "Claude infra lands docs-tier" convention.
-# Both this fallback and the config must state the same four (SAD-285 lockstep);
-# tools/dev/test-land-pr.sh pins the split from both sides.
-tier_pat '.review.securityTierPatterns' '^\.github/workflows/|\.gradle\.kts$|^gradle/libs\.versions\.toml$|^gradle/wrapper/|(^|/)gradle\.properties$|(^|/)AndroidManifest\.xml$|^app/src/main/java/com/enduranceloggr/app/network/|^app/src/main/java/com/enduranceloggr/app/feedback/|^\.claude/settings\.json$|^\.claude/hooks/|^\.claude/commands/(issue|land|prune-worktrees|restore-synthetic)\.md$|^\.claude/workflow\.config\.|^\.githooks/|^tools/dev/land-pr\.sh$|^tools/dev/setup-repo\.sh$|(^|/)\.mcp\.json$|^server/'
+# .claude/commands/ and .claude/agents/ are gated as WHOLE DIRECTORIES (SAD-546).
+# An earlier revision of this change tried an allowlist of the four commands that
+# can destroy data or drive the gate (land, issue, restore-synthetic,
+# prune-worktrees). That form is defeated four ways, because the directory's
+# residual tier is docs (everything in it matches the `*.md` docs glob):
+#   - RENAME       restore-synthetic.md -> restore-synth.md (G3 reads only
+#                  .filename, never .previous_filename — see SAD-604)
+#   - SIBLING      add restore-synthetic-v2.md next to it
+#   - NAMESPACE    add dev/restore-synthetic.md
+#   - NEW COMMAND  add wipe-device.md, destructive from birth and on no list
+# Whole-directory closes all four at once and is fail-safe by default, which is
+# the property a FALLBACK must have: it exists for when the config cannot be
+# trusted, so it must never be NARROWER than the config it stands in for.
+#
+# .claude/agents/ is here for the same reason issue.md is: /issue's entire
+# safety argument is that it only ever spawns the tool-contained radar, and that
+# containment is one frontmatter `tools:` line in .claude/agents/radar.md.
+# Gating the caller but not the containment is a half-measure — a PR adding
+# Bash/Edit/Write to that line would defeat the property issue.md was gated for.
+# Every agent charter is a tool-boundary declaration, so the glob is the right
+# shape.
+#
+# Cost accepted: away.md and linear-triage.md edits pay one Barb pass.
+# SAD-285 lockstep — this fallback, .claude/workflow.config.json,
+# templates/workflow.config.example.json and the §5 tier paragraph in
+# references/workflow.md.tmpl must all move together; test-land-pr.sh asserts
+# the config/fallback identity AND the prose agreement.
+tier_pat '.review.securityTierPatterns' '^\.github/workflows/|\.gradle\.kts$|^gradle/libs\.versions\.toml$|^gradle/wrapper/|(^|/)gradle\.properties$|(^|/)AndroidManifest\.xml$|^app/src/main/java/com/enduranceloggr/app/network/|^app/src/main/java/com/enduranceloggr/app/feedback/|^\.claude/settings\.json$|^\.claude/hooks/|^\.claude/commands/|^\.claude/agents/|^\.claude/workflow\.config\.|^\.githooks/|^tools/dev/land-pr\.sh$|^tools/dev/setup-repo\.sh$|(^|/)\.mcp\.json$|^server/'
 security_pat="$TIER_PAT"
 tier_pat '.review.docsTierPatterns' '\.md$|^docs/|^design/|^tasks/|(^|/)\.gitignore$|^\.github/pull_request_template\.md$|^acceptance-evidence/'
 docs_pat="$TIER_PAT"
@@ -437,10 +455,11 @@ files="$(gh api "repos/$REPO/pulls/$pr/files" --paginate --jq '.[].filename')"
 
 # Tier patterns come from workflow.config.json (globs, converted to ERE);
 # the literals below are the instance-#1 fallbacks when the config is absent.
-# The self-protection set covers FOUR .claude/commands/ entries, not the whole
-# directory — see the rationale block above the securityTierPatterns fallback
-# (SAD-546). Do NOT "simplify" it back to ^\.claude/commands/: the split is
-# deliberate and tools/dev/test-land-pr.sh pins it from both sides.
+# The self-protection set covers .claude/commands/ and .claude/agents/ as WHOLE
+# directories — see the rationale block above the securityTierPatterns fallback
+# (SAD-546). Do NOT narrow either to an allowlist of filenames: the directories'
+# residual tier is docs, so an allowlist is defeated by a rename, a sibling, a
+# namespaced path, or a newly added destructive command.
 
 tier="code"
 if grep -qE "$security_pat" <<<"$files"; then
