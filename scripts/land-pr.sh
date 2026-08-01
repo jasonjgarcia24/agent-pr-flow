@@ -324,7 +324,17 @@ SECURITY_AGENT="$(station security barb)"
 # Tier patterns (globs from config → ERE; hardcoded instance-#1 fallbacks).
 # Fallback slash-less entries use (^|/) to match the documented any-depth glob
 # semantics (Watson PR #162: nested .gitignore divergence was gate-weakening).
-tier_pat '.review.securityTierPatterns' '^\.github/workflows/|\.gradle\.kts$|^gradle/libs\.versions\.toml$|^gradle/wrapper/|(^|/)gradle\.properties$|(^|/)AndroidManifest\.xml$|^app/src/main/java/com/enduranceloggr/app/network/|^app/src/main/java/com/enduranceloggr/app/feedback/|^\.claude/settings\.json$|^\.claude/hooks/|^\.claude/commands/|^\.claude/workflow\.config\.|^\.githooks/|^tools/dev/land-pr\.sh$|^tools/dev/setup-repo\.sh$|(^|/)\.mcp\.json$|^server/'
+#
+# .claude/commands/ is a FOUR-path security set, not the whole directory
+# (SAD-546). The rule is "commands that can destroy data or drive the gate":
+# land.md drives this funnel; issue.md carries the SAD-340/348 property that
+# /issue must only ever spawn the tool-contained radar, because its brief holds
+# untrusted item text; restore-synthetic.md and prune-worktrees.md each delete
+# real data (a device DB / a worktree). Everything else under .claude/commands/
+# stays docs-tier under the standing "Claude infra lands docs-tier" convention.
+# Both this fallback and the config must state the same four (SAD-285 lockstep);
+# tools/dev/test-land-pr.sh pins the split from both sides.
+tier_pat '.review.securityTierPatterns' '^\.github/workflows/|\.gradle\.kts$|^gradle/libs\.versions\.toml$|^gradle/wrapper/|(^|/)gradle\.properties$|(^|/)AndroidManifest\.xml$|^app/src/main/java/com/enduranceloggr/app/network/|^app/src/main/java/com/enduranceloggr/app/feedback/|^\.claude/settings\.json$|^\.claude/hooks/|^\.claude/commands/(issue|land|prune-worktrees|restore-synthetic)\.md$|^\.claude/workflow\.config\.|^\.githooks/|^tools/dev/land-pr\.sh$|^tools/dev/setup-repo\.sh$|(^|/)\.mcp\.json$|^server/'
 security_pat="$TIER_PAT"
 tier_pat '.review.docsTierPatterns' '\.md$|^docs/|^design/|^tasks/|(^|/)\.gitignore$|^\.github/pull_request_template\.md$|^acceptance-evidence/'
 docs_pat="$TIER_PAT"

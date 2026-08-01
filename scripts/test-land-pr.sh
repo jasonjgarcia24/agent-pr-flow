@@ -57,6 +57,69 @@ grep -q "^code xserver/notbackend.py$" "$CFG_OUT" \
   && echo "PASS  xserver/ near-miss stays code — the ^server/ anchor holds (SAD-285)" \
   || { echo "FAIL  xserver/ near-miss must NOT classify security"; fail=1; }
 
+# ---------- .claude/commands/ is a FOUR-path security set (SAD-546) ----------
+# The rule: "commands that can destroy data or drive the gate". Everything else
+# under .claude/commands/ stays docs-tier under the standing "Claude infra lands
+# docs-tier" convention, so it remains cheap to edit.
+#
+# Why this is pinned per-path in BOTH outputs rather than left to the identity
+# assertion above: identity only proves config and fallback AGREE. It stays
+# green if both regress together — e.g. if someone "simplifies" the four back
+# to a whole-directory ^\.claude/commands/ on one side and mirrors it on the
+# other, or drops the four from both. Only an absolute per-path expectation
+# catches a re-merge in either direction.
+#
+# The exposure this closes (Barb, PR #425 audit): a PR touching only
+# .claude/commands/restore-synthetic.md — deleting its "never push to a physical
+# device that still holds real training data" guard — classified `docs`, so G4
+# printed "SKIP  docs tier — CI-alone policy" and it merged with ZERO reviewer
+# or security verdict. .claude/commands/** is NOT in the ADR-0033
+# self-modification carve-out, so an agent can land that autonomously; the next
+# /restore-synthetic then wipes real training data. prune-worktrees.md (worktree
+# deletion) is the same shape.
+#
+# Instance-#1-shaped by design, like the fallback patterns and the
+# docs/requirements.md + server/ assertions above.
+CMD_TIERS="
+docs      .claude/commands/away.md
+security  .claude/commands/issue.md
+security  .claude/commands/land.md
+docs      .claude/commands/linear-triage.md
+security  .claude/commands/prune-worktrees.md
+security  .claude/commands/restore-synthetic.md
+"
+cmd_tier_case() { # $1 = expected tier, $2 = repo-relative path
+  local src f got
+  for src in config fallback; do
+    if [ "$src" = "config" ]; then f="$CFG_OUT"; else f="$FB_OUT"; fi
+    got="$(awk -v p="$2" '$2==p{print $1}' "$f")"
+    [ "$got" = "$1" ] \
+      && echo "PASS  $2 is $1 tier ($src)" \
+      || { echo "FAIL  $2 must be $1 tier under $src — got '${got:-<unclassified>}'"; fail=1; }
+  done
+}
+while read -r _want _path; do
+  [ -n "${_want:-}" ] || continue
+  cmd_tier_case "$_want" "$_path"
+done <<<"$CMD_TIERS"
+
+# Completeness: the table must name EVERY tracked file under .claude/commands/.
+# Without this, a NEW command file silently inherits docs tier from the `*.md`
+# glob (or `code` if it is not markdown) and nobody makes a tier decision —
+# which is exactly how restore-synthetic.md sat at docs. Adding a command now
+# forces an explicit row here. Covers non-.md paths too, so narrowing the
+# fallback from the whole directory to four files cannot quietly downgrade one.
+_declared="$(awk 'NF{print $2}' <<<"$CMD_TIERS" | sort -u)"
+_tracked="$(git ls-files '.claude/commands/' | sort -u)"
+if [ "$_declared" = "$_tracked" ]; then
+  echo "PASS  every tracked .claude/commands/ path has a declared tier (SAD-546)"
+else
+  echo "FAIL  the .claude/commands/ tier table is out of sync with the tree"
+  echo "      (< declared-but-absent / > tracked-but-undeclared):"
+  diff <(printf '%s\n' "$_declared") <(printf '%s\n' "$_tracked") | sed 's/^/      /' | head -10
+  fail=1
+fi
+
 # ---------- G8 close-out SAD resolution (SAD-538) ----------
 # The close-out must name the issue(s) a PR CLOSES — the `Fixes SAD-N` anchor —
 # not the first SAD-N anywhere in the title/body. First-match named the wrong
