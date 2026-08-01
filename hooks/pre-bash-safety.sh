@@ -23,10 +23,11 @@
 # too — catching embedded destructive text is worth the false positives, which
 # are remediated by authoring file content with the Write/Edit tools instead
 # of Bash heredocs. Known limit: $(...) / backtick bodies are not recursed.
-# SAD-552 carves ONE narrow exception out of that naivety, for D0 ONLY (see the
-# D0 pre-pass below): a git/gh MESSAGE body is prose, and prose that NAMES a
-# marker can never set it. Every other rule still scans heredoc and quoted
-# bodies — a commit message spelling `rm -rf /` is still blocked by D3.
+# SAD-552 ATTEMPTED one narrow exception to that naivety for D0 — a git/gh
+# MESSAGE body is prose, and prose that NAMES a marker can never set it — and
+# REVERTED it when two independent reviewers broke it with working exploits.
+# See the D0 pre-pass below for both proofs and the rule that came out of them:
+# a regex cannot decide which program owns a token. Embedded text stays scanned.
 #
 # Escape hatches are JASON-ONLY, and only as AMBIENT env in the shell that
 # launched Claude Code (the hook reads its own environment — an inline
@@ -393,6 +394,14 @@ for seg in "${segments[@]}"; do
      && grep -qE '(^|[[:space:]])config([[:space:]]|$)' <<<"$mseg" \
      && grep -qiE 'core\.hooksPath' <<<"$mseg"; then
     cfg_write=false
+    # The dequote that built $mseg erases an EMPTY quoted value ('' / ""), which
+    # would DEFLATE the positional count and read as a query -- but
+    # `git config core.hooksPath ''` genuinely WRITES an empty value, and git
+    # then behaves as if hooks were unset (verified: a refusing pre-commit stops
+    # running). Probe the RAW segment for it. This is the ONLY deflation the
+    # dequote can cause -- a non-empty quoted value survives as one or more
+    # tokens, which over-counts toward blocking.
+    grep -qE "core\.hooksPath['\"]?[[:space:]]+(''|\"\")+([[:space:]]|$)" <<<"$seg" && cfg_write=true
     after_cfg=false; expect_val=false; positionals=0
     cfg_pos=()
     # shellcheck disable=SC2086 # word-splitting the match-copy into tokens is the point (set -f is on)

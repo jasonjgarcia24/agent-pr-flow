@@ -17,23 +17,61 @@ mk() { # $1 = command, $2 = cwd (default repo root)
   jq -n --arg c "$1" --arg d "${2:-$ROOT}" '{tool_input:{command:$c}, cwd:$d}'
 }
 
-t() { # $1=case name  $2=expected rc  $3=command  [$4=extra env "K=V [K=V...]"]  [$5=cwd]
+t() { # $1=name $2=expected rc $3=command [$4=extra env] [$5=cwd] [$6=expected rule id]
   # extra comes AFTER the default CLAUDE_PROJECT_DIR so tests can override the
   # project scope (SAD-181 repo-scoped F-rows); deliberate word-split.
-  local name="$1" expect="$2" cmd="$3" extra="${4:-}" cwd="${5:-$ROOT}"
-  local rc out
+  # $6 (optional): assert WHICH rule blocked. Without it an expected-2 case
+  # passes if ANY rule fires, so a test can go green for the wrong reason
+  # (Watson, SAD-552). Pass it on adversarial rows where the rule is the point.
+  local name="$1" expect="$2" cmd="$3" extra="${4:-}" cwd="${5:-$ROOT}" rule="${6:-}"
+  local rc out got
   if [ -n "$extra" ]; then
     # shellcheck disable=SC2086 # word-splitting multiple K=V assignments is the point
     out=$(mk "$cmd" "$cwd" | env CLAUDE_PROJECT_DIR="$ROOT" $extra bash "$H/pre-bash-safety.sh" 2>&1); rc=$?
   else
     out=$(mk "$cmd" "$cwd" | env CLAUDE_PROJECT_DIR="$ROOT" bash "$H/pre-bash-safety.sh" 2>&1); rc=$?
   fi
-  if [ "$rc" = "$expect" ]; then
-    echo "PASS  $name (rc=$rc)"; pass=$((pass+1))
+  if [ "$rc" != "$expect" ]; then
+    echo "FAIL  $name (rc=$rc expected=$expect) :: $out"; fail=$((fail+1)); return
+  fi
+  if [ -n "$rule" ]; then
+    got=$(sed -n 's/^pre-bash-safety \[\([A-Z0-9]*\)\].*/\1/p' <<<"$out" | head -1)
+    if [ "$got" != "$rule" ]; then
+      echo "FAIL  $name (rule=$got expected=$rule) :: $out"; fail=$((fail+1)); return
+    fi
+  fi
+  echo "PASS  $name (rc=$rc${rule:+ rule=$rule})"; pass=$((pass+1))
+}
+
+t_delta() { # $1=name $2=baseline-rc $3=head-rc $4=command [$5=cwd]
+  # DIFFERENTIAL row (SAD-552). Every finding in that review surfaced from
+  # running one payload against the PRE-change hook and the HEAD hook and
+  # diffing the verdicts — so an INTENDED change of verdict is asserted here
+  # explicitly, and an UNINTENDED one fails. Baseline = the hook as of the
+  # merge-base with the default branch; skipped (not failed) when that revision
+  # is unavailable, so the suite still runs in a shallow or exported tree.
+  local name="$1" want_base="$2" want_head="$3" cmd="$4" cwd="${5:-$ROOT}"
+  local base_hook rc_b rc_h
+  base_hook="$BASELINE_HOOK"
+  if [ -z "$base_hook" ] || [ ! -s "$base_hook" ]; then
+    echo "SKIP  $name (no baseline hook revision available)"; return
+  fi
+  mk "$cmd" "$cwd" | env CLAUDE_PROJECT_DIR="$ROOT" bash "$base_hook" >/dev/null 2>&1; rc_b=$?
+  mk "$cmd" "$cwd" | env CLAUDE_PROJECT_DIR="$ROOT" bash "$H/pre-bash-safety.sh" >/dev/null 2>&1; rc_h=$?
+  if [ "$rc_b" = "$want_base" ] && [ "$rc_h" = "$want_head" ]; then
+    echo "PASS  $name (base=$rc_b head=$rc_h)"; pass=$((pass+1))
   else
-    echo "FAIL  $name (rc=$rc expected=$expect) :: $out"; fail=$((fail+1))
+    echo "FAIL  $name (base=$rc_b/$want_base head=$rc_h/$want_head)"; fail=$((fail+1))
   fi
 }
+
+# Baseline hook for t_delta: the pre-change revision from the default branch.
+BASELINE_HOOK=""
+_bl="$(mktemp)"
+_base_ref="$(git merge-base HEAD origin/main 2>/dev/null || git rev-parse origin/main 2>/dev/null || true)"
+if [ -n "$_base_ref" ] && git show "$_base_ref:.claude/hooks/pre-bash-safety.sh" > "$_bl" 2>/dev/null && [ -s "$_bl" ]; then
+  BASELINE_HOOK="$_bl"
+fi
 
 echo "== pre-bash-safety.sh: D-rows =="
 t "D1 reset --hard blocked"          2 'git reset --hard HEAD~1'
@@ -258,12 +296,12 @@ git -C "$TMPD0" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 d0env="CLAUDE_PROJECT_DIR=$TMPD0"
 # -- Barb PoC #1: the heredoc is co-located with `git` but OWNED by `bash`.
 hd_barb="$(printf "git log -F - ; bash <<'MSG'\nLAND_PR_TEST=1 tools/dev/land-pr.sh 5\nMSG")"
-t "D0 PoC(Barb): heredoc owned by bash on a git-led line" 2 "$hd_barb" "$d0env" "$TMPD0"
+t "D0 PoC(Barb): heredoc owned by bash on a git-led line" 2 "$hd_barb" "$d0env" "$TMPD0" D0
 hd_barb2="$(printf 'gh pr view 1 --body-file - ; bash <<"MSG"\nLAND_PR_TEST=1 tools/dev/land-pr.sh 5\nMSG')"
-t "D0 PoC(Barb): same shape, gh + double-quoted delimiter" 2 "$hd_barb2" "$d0env" "$TMPD0"
+t "D0 PoC(Barb): same shape, gh + double-quoted delimiter" 2 "$hd_barb2" "$d0env" "$TMPD0" D0
 # -- Watson PoC: a decoy message flag INSIDE a quoted string skews quote pairing.
-t "D0 PoC(Watson): quoted decoy -m skews quote pairing"   2 "git status && echo 'a -m ' && LAND_PR_TEST=1 tools/dev/land-pr.sh 434 && echo 'z'" "$d0env" "$TMPD0"
-t "D0 PoC(Watson): same with a --body decoy"              2 "git status && echo 'a --body ' && LAND_PR_TEST=1 tools/dev/land-pr.sh 434 && echo 'z'" "$d0env" "$TMPD0"
+t "D0 PoC(Watson): quoted decoy -m skews quote pairing"   2 "git status && echo 'a -m ' && LAND_PR_TEST=1 tools/dev/land-pr.sh 434 && echo 'z'" "$d0env" "$TMPD0" D0
+t "D0 PoC(Watson): same with a --body decoy"              2 "git status && echo 'a --body ' && LAND_PR_TEST=1 tools/dev/land-pr.sh 434 && echo 'z'" "$d0env" "$TMPD0" D0
 # -- a message body that NAMES a marker is still blocked, deliberately. The
 #    remedy is `git commit -F <path>`, not a hook carve-out and not a reword.
 hd_prose="$(printf "git commit -F - <<'MSG'\nfix(land): document the LAND_PR_TEST=1 seam\nMSG")"
@@ -297,8 +335,33 @@ t "D0 \$IFS-extended name is a different variable, not glue" 0 "${ifsU}LAND_PR_T
 t "D0 known FP: a Bash grep for the marker blocks (use the Grep tool)" 2 "grep -rn 'LAND_PR_TEST=1' tools/dev/" "$d0env" "$TMPD0"
 # -- the D/F rules still scan embedded text; nothing was carved out for anyone.
 hd_rm="$(printf "git commit -F - <<'MSG'\nfix: stop the rm -rf / footgun\nMSG")"
-t "D3 still scans a heredoc body" 2 "$hd_rm" "$d0env" "$TMPD0"
+t "D3 still scans a heredoc body" 2 "$hd_rm" "$d0env" "$TMPD0" D3
 rm -rf "$TMPD0"
+
+echo "== SAD-552: DIFFERENTIAL rows — every verdict this change moves, asserted =="
+# base = the hook on the default branch, head = this tree. An unintended verdict
+# flip in EITHER direction fails here even if the absolute-rc rows still pass.
+# INTENDED relaxations (the false positives this issue is about):
+t_delta "delta: bare core.hooksPath read now allowed"      2 0 'git config core.hooksPath'
+t_delta "delta: --get-all read now allowed"                2 0 'git config --get-all core.hooksPath'
+t_delta "delta: --get-regexp read now allowed"             2 0 'git config --get-regexp core.hooksPath'
+t_delta "delta: modern config-get read now allowed"        2 0 'git config get core.hooksPath'
+# INTENDED tightenings (pre-existing holes closed by the boundary widening):
+t_delta "delta: bash -c wrapper now blocked"               0 2 "bash -c 'LAND_PR_TEST=1 tools/dev/land-pr.sh 5'"
+t_delta "delta: eval wrapper now blocked"                  0 2 'eval "LAND_PR_TEST=1 tools/dev/land-pr.sh 5"'
+t_delta "delta: printf-to-file now blocked"                0 2 "printf 'LAND_PR_TEST=1 tools/dev/land-pr.sh 5' > /tmp/run.sh"
+t_delta "delta: bare \$9 glue now blocked"                 0 2 "${p9}LAND_PR_TEST=1 tools/dev/land-pr.sh 5"
+t_delta "delta: .githooks trailing-comment decoy now blocked" 0 2 'git config core.hooksPath /tmp/evilhooks # core.hooksPath .githooks'
+# ACCEPTED COST of the widening — asserted so it stays a decision, not a surprise:
+t_delta "delta: a Bash grep for the marker now blocks"     0 2 "grep -rn 'LAND_PR_TEST=1' tools/dev/"
+# MUST NOT MOVE — the controls this issue must not weaken:
+t_delta "delta: inline assignment stays blocked"           2 2 'LAND_PR_TEST=1 tools/dev/land-pr.sh 5'
+t_delta "delta: hooksPath set stays blocked"               2 2 'git config core.hooksPath /tmp/hooks'
+t_delta "delta: hooksPath empty-value set stays blocked"   2 2 "git config core.hooksPath ''"
+t_delta "delta: --unset stays blocked"                     2 2 'git config --unset core.hooksPath'
+t_delta "delta: .githooks doctor set stays allowed"        0 0 'git config core.hooksPath .githooks'
+t_delta "delta: prose-in-heredoc stays blocked"            2 2 "$hd_prose"
+t_delta "delta: -F <path> stays allowed"                   0 0 'git commit -F /tmp/msg.txt'
 
 echo "== SAD-552: F6 separates READING core.hooksPath from WRITING it =="
 t "F6 FP: bare read allowed"                    0 'git config core.hooksPath'

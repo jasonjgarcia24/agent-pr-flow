@@ -96,9 +96,20 @@ scan "resend-key"          '(^|[^A-Za-z0-9_])re_[A-Za-z0-9_]{16,}'
 # "PRIVATE KEY" (space, not underscore) and the longest run of allowed chars at
 # the head of a PEM is "-----BEGIN", ten characters, under the twelve-char floor.
 # Barb and Watson each proved a full private key transiting a grep operand with
-# no tripwire. Armour + ≥100 chars of body is key MATERIAL and is never masked;
-# armour ALONE is a marker (below) and may be. That split is the whole design.
-scan "private-key-material" '[-]{4,}[[:space:]]?BEGIN [A-Z0-9 ]*PRIVATE KEY[-]{4,}[[:space:]nA-Za-z0-9+/=]{100,}'
+# no tripwire. Armour + ≥40 chars of DENSE base64 is key MATERIAL and is never
+# masked; armour ALONE is a marker (below) and may be. That split is the design.
+#
+# ⚠ The body class is base64 ONLY — deliberately NO [[:space:]] inside the run.
+# The first attempt allowed whitespace there and immediately false-positived on
+# PROSE ("-----BEGIN RSA PRIVATE KEY----- is the header of a PEM file and marks
+# where the key material begins"), i.e. it reintroduced the exact bug this issue
+# exists to fix. A real single-line body — a pasted key, or JSON where \n has
+# already been stripped to n above — is one unbroken base64 run; prose is not.
+# 40 rather than 100 so a short EC key still trips. A genuine MULTI-line PEM in
+# output puts its body on its own lines, where the armour line alone still
+# matches the MARKER pattern; output is never masked, so nothing there depends
+# on this one.
+scan "private-key-material" '[-]{4,}[[:space:]]?BEGIN [A-Z0-9 ]*PRIVATE KEY[-]{4,}[[:space:]]*[A-Za-z0-9+/=]{40,}'
 
 # MARKER class. Each is anchored to the real artifact, not to its name:
 #   private-key-block   — RFC 7468 armour is a hyphen RUN; prose and regex
