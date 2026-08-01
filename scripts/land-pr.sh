@@ -42,8 +42,24 @@ for arg in "$@"; do
   esac
 done
 
-grep -qE '^[0-9]+$' <<<"$pr" || die 0 "PR number required (got: '${pr}')"
+# Digit classes throughout this script are ENUMERATED, never the range [0-9].
+# POSIX leaves the meaning of a RANGE inside a bracket expression UNSPECIFIED
+# outside the C locale (glibc >=2.28 resolves ranges through ISO 14651
+# collation), and this repo has already shipped one collating-symbol bug
+# (PR #162), so the class is spelled out rather than trusted to a locale.
+# `LC_ALL=C` would pin the range too, but it is the WRONG tool here: it also
+# changes LC_CTYPE, which widens `\b` — under LC_ALL=C "präfixes SAD-7" IS read
+# as a closing anchor (the non-ASCII byte stops counting as a word character),
+# reopening the exact wrong-issue write the \b guard below closes. Enumerating
+# is locale-independent BY CONSTRUCTION and touches nothing else.
+# Barb LOW, PR #399 / SAD-551.
+grep -qE '^[0123456789]+$' <<<"$pr" || die 0 "PR number required (got: '${pr}')"
 command -v jq >/dev/null 2>&1 || die 0 "jq missing"
+# awk is a hard prereq of the G8 anchor picker (de-duplication). Without it the
+# picker silently yields nothing and the close-out degrades to `fallback` —
+# naming a RELATED issue as the closed one, which is the failure SAD-538 fixed.
+# Fail loud instead of fail-quiet. Barb Info, PR #399 / SAD-551.
+command -v awk >/dev/null 2>&1 || die 0 "awk missing (the G8 SAD-anchor picker de-duplicates through it)"
 # The LAND_PR_SELFTEST classifier and the LAND_PR_SADTEST picker
 # (tools/dev/test-land-pr.sh) need only jq + the config; skip the gh-dependent
 # checks so they run OFFLINE in CI (SAD-257 (c), SAD-538).
@@ -99,8 +115,8 @@ fi
 
 # Canonical, de-duplicated, order-preserving SAD-N anchors from stdin.
 _sad_anchor_ids() {
-  grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*:?[[:space:]]+SAD-[0-9]+' \
-    | grep -oiE 'SAD-[0-9]+' \
+  grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*:?[[:space:]]+SAD-[0123456789]+' \
+    | grep -oiE 'SAD-[0123456789]+' \
     | tr '[:lower:]' '[:upper:]' \
     | awk '!seen[$0]++'
 }
@@ -131,7 +147,7 @@ resolve_sad() {  # $1 = PR title, $2 = PR body; sets sad_pick / sad_how
   # No anchor anywhere → first-match over both fields, so anchorless and legacy
   # PRs still resolve. Newline-joined, never space-joined (see above).
   sad_pick="$(printf '%s\n%s\n' "$1" "$2" \
-    | grep -oiE '\bSAD-[0-9]+' | tr '[:lower:]' '[:upper:]' | head -1)"
+    | grep -oiE '\bSAD-[0123456789]+' | tr '[:lower:]' '[:upper:]' | head -1)"
   if [ -n "$sad_pick" ]; then sad_how="fallback"; else sad_how="none"; fi
 }
 
@@ -140,7 +156,14 @@ resolve_sad() {  # $1 = PR title, $2 = PR body; sets sad_pick / sad_how
 # the real G8 call passes. Resolves and exits; no PR is read or touched, and no
 # config is needed, so it runs offline.
 if [ "${LAND_PR_SADTEST:-0}" = "1" ]; then
-  IFS= read -r _sad_t || _sad_t=""
+  # `|| :`, NOT `|| _sad_t=""`: at EOF `read` ASSIGNS the partial line and THEN
+  # returns non-zero, so the assignment form threw away a title that arrived
+  # without a trailing newline. `read` also assigns an empty value on genuinely
+  # empty stdin, so `set -u` stays satisfied either way. The real G8 passes
+  # title/body as ARGUMENTS, so only this seam was affected — but the seam is
+  # what tools/dev/test-land-pr.sh trusts, which made the tests validate
+  # slightly different input than production resolves. Watson, PR #399/SAD-551.
+  IFS= read -r _sad_t || :
   _sad_b="$(cat)"
   resolve_sad "$_sad_t" "$_sad_b"
   echo "${sad_how}${sad_pick:+ $sad_pick}"
@@ -418,7 +441,7 @@ else
 fi
 
 # ---------- G5: SAD linkage (WARN only) ----------
-if grep -qE 'SAD-[0-9]+' <<<"$title$body"; then
+if grep -qE 'SAD-[0123456789]+' <<<"$title$body"; then
   note "G5 PASS  SAD linkage present"
 else
   note "G5 WARN  no SAD-N in title/body — Linear won't auto-transition"

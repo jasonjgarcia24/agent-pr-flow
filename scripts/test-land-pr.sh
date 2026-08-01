@@ -105,6 +105,41 @@ sad_case "no anchor at all -> first-match fallback, flagged as such" "fallback S
   "relates to SAD-7 and SAD-9"
 sad_case "no SAD-N at all -> none" "none" "docs: tidy the README" "nothing to see"
 
+# ---------- locale independence of the id shape (SAD-551) ----------
+# POSIX leaves a RANGE inside a bracket expression ([0-9]) UNSPECIFIED outside
+# the C locale, and this repo already shipped one collating-symbol bug (PR #162),
+# so the digit classes are written ENUMERATED. Two properties are pinned
+# together because the obvious alternative fix — LC_ALL=C — buys the first at the
+# cost of the second (it changes LC_CTYPE too, so a non-ASCII byte stops being a
+# word character and `\b` fires mid-word). See land-pr.sh's _sad_anchor_ids.
+sad_case "non-ASCII digits are not a SAD id (Arabic-Indic)" "none" "t" \
+  "$(printf 'Fixes SAD-\xd9\xa5\xd9\xa3\xd9\xa8\n')"
+sad_case "non-ASCII digits are not a SAD id (fullwidth)" "none" "t" \
+  "$(printf 'Fixes SAD-\xef\xbc\x95\xef\xbc\x93\xef\xbc\x98\n')"
+# The discriminating half: goes RED the moment anyone pins the ranges with
+# LC_ALL=C instead, because "präfixes" would then read as a closing anchor —
+# reopening the exact wrong-issue write the \b guard closes.
+sad_case "'präfixes SAD-N' is NOT an anchor either (\\b needs LC_CTYPE)" "fallback SAD-7" "t" \
+  "$(printf 'pr\xc3\xa4fixes SAD-7\n')"
+
+# ---------- picker seam: unterminated stdin (SAD-551) ----------
+# `read` assigns the partial line and THEN returns non-zero at EOF, so the old
+# `|| _sad_t=""` threw away a title that arrived without a trailing newline.
+# Only the SEAM is affected — the real G8 passes title/body as ARGUMENTS — but
+# the seam is what every case above trusts, so it has to resolve the same text
+# production does. Watson, PR #399.
+sad_raw_case() { # $1 = label, $2 = expected, $3 = exact stdin (printf %b escapes)
+  local got
+  got="$(printf '%b' "$3" | LAND_PR_TEST=1 LAND_PR_SADTEST=1 tools/dev/land-pr.sh 0)"
+  [ "$got" = "$2" ] \
+    && echo "PASS  $1" \
+    || { echo "FAIL  $1 — expected '$2', got '$got'"; fail=1; }
+}
+sad_raw_case "unterminated title (no trailing newline) survives" "anchor SAD-9" 'fixes SAD-9'
+sad_raw_case "unterminated body still resolves its anchor" "anchor SAD-200" \
+  'fix: SAD-100 regresses the node ring\nFixes SAD-200'
+sad_raw_case "empty stdin -> none (set -u stays satisfied)" "none" ''
+
 # The seam itself must be refused without LAND_PR_TEST=1 — it skips every gate,
 # so --dry-run is NOT sufficient authorization (Barb MEDIUM, PR #399).
 if LAND_PR_SADTEST=1 tools/dev/land-pr.sh 0 --dry-run </dev/null >/dev/null 2>&1; then
