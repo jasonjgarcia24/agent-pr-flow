@@ -8,7 +8,16 @@
 
 set -u
 
-ROOT="$(git rev-parse --show-toplevel)" || exit 1
+# Resolve the repo from THIS SCRIPT's own location, not the caller's CWD (Barb
+# LOW-2, SAD-546). `git rev-parse --show-toplevel` alone reads the CWD, so
+# `bash /path/to/some-worktree/tools/dev/test-land-pr.sh` silently tested
+# whichever checkout the caller happened to be standing in — it cd'd there and
+# ran THAT tree's land-pr.sh against THAT tree's config. Found live while
+# verifying SAD-546: a run launched by absolute path from the primary checkout
+# reported the pre-fix tiers and looked like the fix had not worked. The
+# wrong-tree PASS is the dangerous direction — it green-lights a gate change
+# that was never actually exercised.
+ROOT="$(git -C "$(dirname -- "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)" || exit 1
 cd "$ROOT" || exit 1
 
 LIST="$(mktemp)"; CFG_OUT="$(mktemp)"; FB_OUT="$(mktemp)"
@@ -56,6 +65,111 @@ grep -q "^security server/app/routers/feedback.py$" "$CFG_OUT" \
 grep -q "^code xserver/notbackend.py$" "$CFG_OUT" \
   && echo "PASS  xserver/ near-miss stays code — the ^server/ anchor holds (SAD-285)" \
   || { echo "FAIL  xserver/ near-miss must NOT classify security"; fail=1; }
+
+# ---------- .claude/commands/ + .claude/agents/ are WHOLE-DIRECTORY security (SAD-546) ----------
+# EVERY tracked path in both directories must classify `security` under BOTH the
+# config and the fallback. The sensitivity column is the written record of WHY
+# the directories are gated — it is documentation, NOT a per-file tier
+# expectation. Do not reintroduce a docs-tier row: that is the allowlist shape
+# this change deliberately abandoned.
+#
+# History, so nobody re-derives the abandoned form: this started as an allowlist
+# of the four commands that can destroy data or drive the gate. Because the
+# residual tier of both directories is `docs` (everything matches the `*.md`
+# docs glob), an allowlist is defeated four ways — RENAME (G3 reads only
+# .filename, never .previous_filename — SAD-604), SIBLING (restore-synthetic-v2.md),
+# NAMESPACE (dev/restore-synthetic.md), and NEW COMMAND (wipe-device.md, born
+# destructive and on no list). Whole-directory closes all four at once and keeps
+# the FALLBACK fail-safe, which is the property it must have: it stands in for a
+# config that cannot be trusted, so it must never be narrower than that config.
+#
+# The exposure this closes (Barb, PR #425 audit): a PR touching only
+# .claude/commands/restore-synthetic.md — deleting its "never push to a physical
+# device that still holds real training data" guard — classified `docs`, so G4
+# printed "SKIP  docs tier — CI-alone policy" and it merged with ZERO reviewer
+# or security verdict. .claude/commands/** is NOT in the ADR-0033
+# self-modification carve-out, so an agent can land that autonomously; the next
+# /restore-synthetic then wipes real training data.
+#
+# Why pinned per-path in BOTH outputs rather than left to the identity assertion
+# above: identity only proves config and fallback AGREE. It stays green if both
+# regress together. Only an absolute per-path expectation catches that.
+#
+# Instance-#1-shaped by design, like the fallback patterns and the
+# docs/requirements.md + server/ assertions above.
+GATED_INFRA="
+destructive   .claude/commands/restore-synthetic.md
+destructive   .claude/commands/prune-worktrees.md
+gate-driving  .claude/commands/land.md
+gate-driving  .claude/commands/issue.md
+ordinary      .claude/commands/away.md
+ordinary      .claude/commands/linear-triage.md
+containment   .claude/agents/radar.md
+"
+infra_tier_case() { # $1 = sensitivity (documentation only), $2 = repo-relative path
+  local src f got
+  for src in config fallback; do
+    if [ "$src" = "config" ]; then f="$CFG_OUT"; else f="$FB_OUT"; fi
+    got="$(awk -v p="$2" '$2==p{print $1}' "$f")"
+    [ "$got" = "security" ] \
+      && echo "PASS  $2 is security tier ($src) [$1]" \
+      || { echo "FAIL  $2 must be security tier under $src — got '${got:-<unclassified>}'"; fail=1; }
+  done
+}
+while read -r _sens _path; do
+  [ -n "${_sens:-}" ] || continue
+  infra_tier_case "$_sens" "$_path"
+done <<<"$GATED_INFRA"
+
+# Completeness: the table must name EVERY tracked file under BOTH directories.
+# Whole-directory patterns already gate a new file, so this no longer guards the
+# TIER — it guards the RECORD: adding a command or an agent charter forces an
+# explicit sensitivity row, which is what makes the gating rationale reviewable
+# instead of folklore. It also catches the reverse (a row for a deleted file).
+_declared="$(awk 'NF{print $2}' <<<"$GATED_INFRA" | sort -u)"
+_tracked="$(git ls-files '.claude/commands/' '.claude/agents/' | sort -u)"
+if [ "$_declared" = "$_tracked" ]; then
+  echo "PASS  every tracked .claude/commands/ + .claude/agents/ path is declared (SAD-546)"
+else
+  echo "FAIL  the gated-infra table is out of sync with the tree"
+  echo "      (< declared-but-absent / > tracked-but-undeclared):"
+  diff <(printf '%s\n' "$_declared") <(printf '%s\n' "$_tracked") | sed 's/^/      /' | head -10
+  fail=1
+fi
+
+# ---------- the PROSE surface must match the config (Barb MED-3 / LOW-3) ----------
+# Six surfaces state this tier rule: the config, the land-pr.sh fallback, the
+# bundle's config template, the §5 tier paragraph in the workflow reference, and
+# the two script comment blocks. One of them (the workflow paragraph) drifted
+# INSIDE the PR that introduced this test — it still described the abandoned
+# allowlist. Prose that contradicts the gate is how the next author "simplifies"
+# the gate back to a weaker shape, so the doc is asserted, not trusted.
+#
+# Direction asserted: every `.claude/` entry in securityTierPatterns must be
+# named verbatim in the paragraph. That catches the doc UNDER-describing what is
+# gated — the drift that actually happened. A backticked path in the prose that
+# is NOT gated is caught by the same comparison from the other side.
+WF_REF=".claude/references/pm/workflow.md"
+WF_CFG=".claude/workflow.config.json"
+if [ -f "$WF_CFG" ] && [ -f "$WF_REF" ]; then
+  _cfg_claude="$(jq -r '.review.securityTierPatterns[]? | select(startswith(".claude/"))' "$WF_CFG" | sort -u)"
+  _para="$(awk '/^- \*\*security\*\*/{p=1} p{print} p&&/^- \*\*docs\*\*/{exit}' "$WF_REF")"
+  _missing=""
+  while IFS= read -r _e; do
+    [ -n "$_e" ] || continue
+    grep -qF -- "\`$_e\`" <<<"$_para" || _missing="${_missing}${_missing:+, }$_e"
+  done <<<"$_cfg_claude"
+  if [ -z "$_missing" ]; then
+    echo "PASS  $WF_REF §5 names every .claude/ security pattern (SAD-546)"
+  else
+    echo "FAIL  $WF_REF §5 does not name: $_missing"
+    echo "      SAD-285 lockstep — the config, the land-pr.sh fallback, the bundle"
+    echo "      config template and this paragraph all move together."
+    fail=1
+  fi
+else
+  echo "PASS  prose/config agreement skipped (no config or no $WF_REF)"
+fi
 
 # ---------- G8 close-out SAD resolution (SAD-538) ----------
 # The close-out must name the issue(s) a PR CLOSES — the `Fixes SAD-N` anchor —

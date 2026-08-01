@@ -324,7 +324,35 @@ SECURITY_AGENT="$(station security barb)"
 # Tier patterns (globs from config → ERE; hardcoded instance-#1 fallbacks).
 # Fallback slash-less entries use (^|/) to match the documented any-depth glob
 # semantics (Watson PR #162: nested .gitignore divergence was gate-weakening).
-tier_pat '.review.securityTierPatterns' '^\.github/workflows/|\.gradle\.kts$|^gradle/libs\.versions\.toml$|^gradle/wrapper/|(^|/)gradle\.properties$|(^|/)AndroidManifest\.xml$|^app/src/main/java/com/enduranceloggr/app/network/|^app/src/main/java/com/enduranceloggr/app/feedback/|^\.claude/settings\.json$|^\.claude/hooks/|^\.claude/commands/|^\.claude/workflow\.config\.|^\.githooks/|^tools/dev/land-pr\.sh$|^tools/dev/setup-repo\.sh$|(^|/)\.mcp\.json$|^server/'
+#
+# .claude/commands/ and .claude/agents/ are gated as WHOLE DIRECTORIES (SAD-546).
+# An earlier revision of this change tried an allowlist of the four commands that
+# can destroy data or drive the gate (land, issue, restore-synthetic,
+# prune-worktrees). That form is defeated four ways, because the directory's
+# residual tier is docs (everything in it matches the `*.md` docs glob):
+#   - RENAME       restore-synthetic.md -> restore-synth.md (G3 reads only
+#                  .filename, never .previous_filename — see SAD-604)
+#   - SIBLING      add restore-synthetic-v2.md next to it
+#   - NAMESPACE    add dev/restore-synthetic.md
+#   - NEW COMMAND  add wipe-device.md, destructive from birth and on no list
+# Whole-directory closes all four at once and is fail-safe by default, which is
+# the property a FALLBACK must have: it exists for when the config cannot be
+# trusted, so it must never be NARROWER than the config it stands in for.
+#
+# .claude/agents/ is here for the same reason issue.md is: /issue's entire
+# safety argument is that it only ever spawns the tool-contained radar, and that
+# containment is one frontmatter `tools:` line in .claude/agents/radar.md.
+# Gating the caller but not the containment is a half-measure — a PR adding
+# Bash/Edit/Write to that line would defeat the property issue.md was gated for.
+# Every agent charter is a tool-boundary declaration, so the glob is the right
+# shape.
+#
+# Cost accepted: away.md and linear-triage.md edits pay one Barb pass.
+# SAD-285 lockstep — this fallback, .claude/workflow.config.json,
+# templates/workflow.config.example.json and the §5 tier paragraph in
+# references/workflow.md.tmpl must all move together; test-land-pr.sh asserts
+# the config/fallback identity AND the prose agreement.
+tier_pat '.review.securityTierPatterns' '^\.github/workflows/|\.gradle\.kts$|^gradle/libs\.versions\.toml$|^gradle/wrapper/|(^|/)gradle\.properties$|(^|/)AndroidManifest\.xml$|^app/src/main/java/com/enduranceloggr/app/network/|^app/src/main/java/com/enduranceloggr/app/feedback/|^\.claude/settings\.json$|^\.claude/hooks/|^\.claude/commands/|^\.claude/agents/|^\.claude/workflow\.config\.|^\.githooks/|^tools/dev/land-pr\.sh$|^tools/dev/setup-repo\.sh$|(^|/)\.mcp\.json$|^server/'
 security_pat="$TIER_PAT"
 tier_pat '.review.docsTierPatterns' '\.md$|^docs/|^design/|^tasks/|(^|/)\.gitignore$|^\.github/pull_request_template\.md$|^acceptance-evidence/'
 docs_pat="$TIER_PAT"
@@ -427,8 +455,11 @@ files="$(gh api "repos/$REPO/pulls/$pr/files" --paginate --jq '.[].filename')"
 
 # Tier patterns come from workflow.config.json (globs, converted to ERE);
 # the literals below are the instance-#1 fallbacks when the config is absent.
-# Self-protection set includes .claude/commands/ (deliberate extension of the
-# Correction-7 list, Watson review: /land's instructions are part of the gate).
+# The self-protection set covers .claude/commands/ and .claude/agents/ as WHOLE
+# directories — see the rationale block above the securityTierPatterns fallback
+# (SAD-546). Do NOT narrow either to an allowlist of filenames: the directories'
+# residual tier is docs, so an allowlist is defeated by a rename, a sibling, a
+# namespaced path, or a newly added destructive command.
 
 tier="code"
 if grep -qE "$security_pat" <<<"$files"; then
