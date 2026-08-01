@@ -157,8 +157,12 @@ mechanical — open decision on SAD-298. **Escape hatches are Jason-only, ambien
 
 **False-positive remediation:** the hook scans embedded text too (heredocs, quoted strings,
 commit messages). If a legitimate command trips a rule — e.g. authoring a doc that *mentions*
-`git push origin {{DEFAULT_BRANCH}}`, or a commit message quoting a hatch assignment — author
-the content with the **Write/Edit tools** (or `git commit -F <file>`), or reword; never bypass.
+`git push origin {{DEFAULT_BRANCH}}` — author the content with the **Write/Edit tools**, or
+`git commit -F <file>`; never bypass. **Do NOT reword around a rule.** Rewording is
+indistinguishable from evasion to any downstream classifier, and it hides the defect: a rule that
+fires on prose is a bug to file, not a hurdle to route around (SAD-552). D0 already carves out a
+git/gh MESSAGE body — prose naming a hatch is fine inside a quoted-delimiter heredoc
+(`<<'MSG'` fed to `-F -`) or an inert quoted `-m` / `--body` value.
 
 ## §7 Close-out — the 3 surfaces
 
