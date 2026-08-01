@@ -437,8 +437,10 @@ files="$(gh api "repos/$REPO/pulls/$pr/files" --paginate --jq '.[].filename')"
 
 # Tier patterns come from workflow.config.json (globs, converted to ERE);
 # the literals below are the instance-#1 fallbacks when the config is absent.
-# Self-protection set includes .claude/commands/ (deliberate extension of the
-# Correction-7 list, Watson review: /land's instructions are part of the gate).
+# The self-protection set covers FOUR .claude/commands/ entries, not the whole
+# directory — see the rationale block above the securityTierPatterns fallback
+# (SAD-546). Do NOT "simplify" it back to ^\.claude/commands/: the split is
+# deliberate and tools/dev/test-land-pr.sh pins it from both sides.
 
 tier="code"
 if grep -qE "$security_pat" <<<"$files"; then

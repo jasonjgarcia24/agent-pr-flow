@@ -8,7 +8,16 @@
 
 set -u
 
-ROOT="$(git rev-parse --show-toplevel)" || exit 1
+# Resolve the repo from THIS SCRIPT's own location, not the caller's CWD (Barb
+# LOW-2, SAD-546). `git rev-parse --show-toplevel` alone reads the CWD, so
+# `bash /path/to/some-worktree/tools/dev/test-land-pr.sh` silently tested
+# whichever checkout the caller happened to be standing in — it cd'd there and
+# ran THAT tree's land-pr.sh against THAT tree's config. Found live while
+# verifying SAD-546: a run launched by absolute path from the primary checkout
+# reported the pre-fix tiers and looked like the fix had not worked. The
+# wrong-tree PASS is the dangerous direction — it green-lights a gate change
+# that was never actually exercised.
+ROOT="$(git -C "$(dirname -- "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)" || exit 1
 cd "$ROOT" || exit 1
 
 LIST="$(mktemp)"; CFG_OUT="$(mktemp)"; FB_OUT="$(mktemp)"
