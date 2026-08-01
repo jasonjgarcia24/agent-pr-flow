@@ -23,6 +23,10 @@
 # too — catching embedded destructive text is worth the false positives, which
 # are remediated by authoring file content with the Write/Edit tools instead
 # of Bash heredocs. Known limit: $(...) / backtick bodies are not recursed.
+# SAD-552 carves ONE narrow exception out of that naivety, for D0 ONLY (see the
+# D0 pre-pass below): a git/gh MESSAGE body is prose, and prose that NAMES a
+# marker can never set it. Every other rule still scans heredoc and quoted
+# bodies — a commit message spelling `rm -rf /` is still blocked by D3.
 #
 # Escape hatches are JASON-ONLY, and only as AMBIENT env in the shell that
 # launched Claude Code (the hook reads its own environment — an inline
@@ -90,18 +94,99 @@ block() { # $1 = rule id, $2 = message
 # `2>&1` noise segments are harmless.
 mapfile -t segments < <(sed -E 's/&&|\|\||;|\||&/\n/g' <<<"$cmd")
 
+# ---- D0 — inline escape-hatch / test-seam assignment (PRE-PASS, SAD-552) ----
+# D0 blocks an assignment to a hatch/test-seam name. SKIP_BASH_SAFETY & friends
+# are read from THIS hook's ambient env so an inline form never works anyway —
+# but the LAND_PR_* seams are read by land-pr.sh's OWN process, so an inline
+# `LAND_PR_TEST=1 tools/dev/land-pr.sh 5` genuinely takes effect. D0 is a real
+# control, not just a signal, and it stays maximally broad.
+#
+# SAD-552 — "MENTIONS the marker" is not "SETS the marker". A commit message or
+# PR body that documents a seam is prose; it is stored, never parsed as a
+# command. Exactly two provably-INERT regions are blanked before D0 matches:
+#
+#   (a) a quoted-delimiter heredoc body — <<'EOF' / <<"EOF" / <<\EOF perform NO
+#       expansion and NO command substitution, so the body is literal text —
+#       whose operator line reads the message from STDIN (-F - / --file - /
+#       --body-file - / --input -). Requires the WHOLE command to carry exactly
+#       ONE heredoc operator: with two, delimiter tracking could misalign the
+#       body region, so ≠1 blanks nothing.
+#   (b) the INERT literal value of a message-carrying flag: single-quoted, or
+#       double-quoted with no `$` and no backtick. A value holding $(…), `…`,
+#       or ${…} is NOT inert and is left in place for D0 to see.
+#
+# BOTH are gated on the command's FIRST WORD being `git` or `gh` (path prefix
+# allowed, nothing else — no wrapper, no interpreter, no eval can be the
+# program). Under that gate no listed flag's value is ever executed: git/gh
+# store a message, they do not run it. `gh alias set '!cmd'` and
+# `git config alias.x '!cmd'` DO execute their argument — neither sits behind a
+# message flag, so neither is masked. `-t` is deliberately NOT in the flag list
+# (ssh -t '<cmd>' executes its value).
+#
+# Net effect on what gets through: prose naming a marker inside a git/gh message
+# body. An assignment anywhere else — command position, an unquoted heredoc, a
+# $(…)-bearing value, a sibling segment, any non-git/gh program — still blocks.
+d0_text="$cmd"
+if [[ "$cmd" =~ ^[[:space:]]*([^[:space:]]*/)?(git|gh)[[:space:]] ]]; then
+  # (a) heredoc body -> blanked
+  mapfile -t hd_ops < <(grep -oE "<<-?[[:space:]]*(\"[A-Za-z_][A-Za-z0-9_]*\"|'[A-Za-z_][A-Za-z0-9_]*'|\\\\[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*)" <<<"$cmd")
+  if [ "${#hd_ops[@]}" -eq 1 ]; then
+    hd_raw="${hd_ops[0]#*<<}"; hd_raw="${hd_raw#-}"
+    hd_raw="$(sed -E 's/^[[:space:]]+//' <<<"$hd_raw")"
+    hd_q="${hd_raw:0:1}"
+    hd_delim="${hd_raw//\'/}"; hd_delim="${hd_delim//\"/}"; hd_delim="${hd_delim//\\/}"
+    hd_line=0; hd_op_text=""; i=0
+    while IFS= read -r l; do
+      i=$((i + 1))
+      case "$l" in *"${hd_ops[0]}"*) hd_line=$i; hd_op_text="$l"; break ;; esac
+    done <<<"$cmd"
+    if [ "$hd_line" -gt 0 ] && [ -n "$hd_delim" ] \
+       && { [ "$hd_q" = "'" ] || [ "$hd_q" = '"' ] || [ "$hd_q" = '\' ]; } \
+       && grep -qE '(^|[[:space:]])(-F|--file|--body-file|--input)([[:space:]]+|=)-([[:space:]]|$)' <<<"$hd_op_text"; then
+      # Blank body lines only — never the operator line (an assignment sharing
+      # that line is still scanned). Ends at the delimiter; whitespace-tolerant,
+      # which can only end the region EARLY -> more scanning, never less.
+      d0_text="$(awk -v start="$hd_line" -v d="$hd_delim" '
+        NR <= start { print; next }
+        ended       { print; next }
+        { t = $0; sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
+          if (t == d) { ended = 1; print; next }
+          print "" }' <<<"$cmd")"
+    fi
+  fi
+  # (b) inert message-flag values -> blanked. Newlines collapse to spaces first
+  # so a multi-line quoted value is one region for the (quote-bounded, so never
+  # over-reaching) match; `\n` and ` ` are the same boundary class to D0's
+  # (^|[[:space:]]) anchor, so collapsing can only expose a marker, never hide one.
+  d0_flags='((^|[[:space:]])((-m|-b|--message|--body|--subject|--title|--notes|--description)([[:space:]]+|=)|(-f|-F|--field|--raw-field)[[:space:]]+(body|title|message)=))'
+  d0_text="$(tr '\n' ' ' <<<"$d0_text")"
+  d0_text="$(sed -E "s/$d0_flags'[^']*'/\1''/g" <<<"$d0_text")"
+  # shellcheck disable=SC2016 # the $ and ` are literal EXCLUSIONS in the bracket, not expansions
+  d0_text="$(sed -E 's/'"$d0_flags"'"[^"$`]*"/\1""/g' <<<"$d0_text")"
+fi
+#
+# The leading boundary is `[^A-Za-z0-9_]`, NOT `[[:space:]]` (SAD-552, found by
+# this change's own adversarial pass): the old anchor missed an assignment
+# sitting immediately after a QUOTE, so `bash -c 'LAND_PR_TEST=1 land-pr.sh 5'`,
+# `eval "LAND_PR_TEST=1 …"` and `printf 'LAND_PR_TEST=1 …' > run.sh` all walked
+# straight through. Any non-identifier char now opens the match (a preceding
+# identifier char still does not, so MY_LAND_PR_TEST= stays unmatched). This is
+# a TIGHTENING shipped alongside the carve-out above — D0 gets broader in
+# command contexts and narrower only inside a git/gh message body.
+mapfile -t d0_segments < <(sed -E 's/&&|\|\||;|\||&/\n/g' <<<"$d0_text")
+for seg in "${d0_segments[@]}"; do
+  if grep -qE '(^|[^A-Za-z0-9_])(SKIP_BASH_SAFETY|ALLOW_DESTRUCTIVE|ALLOW_MAIN_PUSH|ALLOW_DISABLED_STATION|ADB_NO_SERIAL_OK|LAND_PR_CFG_OVERRIDE|LAND_PR_SELFTEST|LAND_PR_SADTEST|LAND_PR_TEST)=' <<<"$seg"; then
+    block D0 "inline escape-hatch / test-seam assignment — these are Jason-only AMBIENT env (set in the shell that launched Claude), never in a command. (Documenting one in a git/gh message is fine: put the prose in a quoted-delimiter heredoc — <<'MSG' — or a single-quoted -m/--body value.)"
+  fi
+done
+
 warned_x=false
 for seg in "${segments[@]}"; do
   # Trim whitespace + subshell parens.
   seg="$(sed -E 's/^[[:space:](]+//; s/[)[:space:]]+$//' <<<"$seg")"
   [ -z "$seg" ] && continue
 
-  # D0 — inline escape-hatch assignment (checked on the RAW segment, before
-  # normalization strips assignments). It would not work anyway — the hook
-  # reads ambient env — so an attempt only signals evasion; block it loudly.
-  if grep -qE '(^|[[:space:]])(SKIP_BASH_SAFETY|ALLOW_DESTRUCTIVE|ALLOW_MAIN_PUSH|ALLOW_DISABLED_STATION|ADB_NO_SERIAL_OK|LAND_PR_CFG_OVERRIDE|LAND_PR_SELFTEST|LAND_PR_SADTEST|LAND_PR_TEST)=' <<<"$seg"; then
-    block D0 "inline escape-hatch / test-seam assignment — these are Jason-only AMBIENT env (set in the shell that launched Claude), never in a command"
-  fi
+  # (D0 runs as a pre-pass above — it needs the WHOLE command, not a segment.)
 
   # Normalized match-copy: normalize runtime-vanishing obfuscation, THEN dequote,
   # then strip wrapper prefixes and leading VAR=val assignments. All rules below
@@ -299,20 +384,54 @@ for seg in "${segments[@]}"; do
 
   # F6 — hook-evasion signals (D0 spirit; Barb audit: --no-verify DOES skip
   # pre-push — a git invariant; --no-ver[a-z]* covers git's prefix
-  # abbreviations). Case-insensitive on hooksPath (git config keys are);
-  # a pure read (--get) is exempt (Watson nit — the doctor reads it).
+  # abbreviations). Case-insensitive on hooksPath (git config keys are).
   if $is_git && $in_project && grep -qE '(^|[[:space:]])--no-ver[a-z-]*([[:space:]]|$)' <<<"$mseg"; then
     block F6 "--no-verify skips git hooks — evasion signal; never use it"
   fi
   if $is_git && $in_project && grep -qiE 'core\.hooksPath=' <<<"$mseg"; then
     block F6 "inline core.hooksPath override — evasion signal"
   fi
+  # SAD-552 — READING core.hooksPath is not WRITING it. The old rule exempted
+  # only `--get`, so the doctor's other read forms (bare `git config <name>`,
+  # `--get-all`, `--get-regexp`, the modern `git config get <name>`) blocked a
+  # query that changes nothing. Only a WRITE can point hooks away from
+  # .githooks, and a write is exactly one of:
+  #   • an explicit write flag  — --add --replace-all --unset --unset-all
+  #                               --edit/-e --rename-section --remove-section
+  #   • a modern write subcmd   — config set|unset|unset-all|edit|
+  #                               rename-section|remove-section
+  #   • the deprecated form WITH a value — `git config <name> <value>`, i.e.
+  #     TWO positionals after `config`; ONE positional is a read.
+  # The positional walk skips the value of each value-taking location/type flag;
+  # a flag missing from that list can only INFLATE the count -> over-block.
+  # Ambiguity therefore always resolves toward blocking, never toward allowing.
   if $is_git && $in_project \
      && grep -qE '(^|[[:space:]])config([[:space:]]|$)' <<<"$mseg" \
-     && grep -qiE 'core\.hooksPath' <<<"$mseg" \
-     && ! grep -qE '(^|[[:space:]])--get([[:space:]]|$)' <<<"$mseg" \
-     && ! grep -qiE 'core\.hooksPath[[:space:]]+\.githooks([[:space:]]|$)' <<<"$mseg"; then
-    block F6 "pointing core.hooksPath away from .githooks — evasion signal"
+     && grep -qiE 'core\.hooksPath' <<<"$mseg"; then
+    cfg_write=false
+    grep -qE '(^|[[:space:]])(--add|--replace-all|--unset|--unset-all|--edit|-e|--rename-section|--remove-section)([[:space:]]|=|$)' <<<"$mseg" && cfg_write=true
+    grep -qE '(^|[[:space:]])config[[:space:]]+(set|unset|unset-all|edit|rename-section|remove-section)([[:space:]]|$)' <<<"$mseg" && cfg_write=true
+    if ! $cfg_write; then
+      after_cfg=false; expect_val=false; positionals=0; first_pos=""
+      # shellcheck disable=SC2086 # word-splitting the match-copy into tokens is the point (set -f is on)
+      for tok in $mseg; do
+        if ! $after_cfg; then [ "$tok" = "config" ] && after_cfg=true; continue; fi
+        if $expect_val; then expect_val=false; continue; fi
+        case "$tok" in
+          -f|--file|--blob|-t|--type|--default|--comment) expect_val=true; continue ;;
+          -*) continue ;;
+        esac
+        positionals=$((positionals + 1))
+        [ -z "$first_pos" ] && first_pos="$tok"
+      done
+      case "$first_pos" in
+        get|get-all|get-regexp|get-urlmatch|list) ;;   # modern read subcommand
+        *) [ "$positionals" -ge 2 ] && cfg_write=true ;;
+      esac
+    fi
+    if $cfg_write && ! grep -qiE 'core\.hooksPath([[:space:]]+|=)\.githooks([[:space:]]|$)' <<<"$mseg"; then
+      block F6 "pointing core.hooksPath away from .githooks — evasion signal"
+    fi
   fi
 
   if $is_git && $in_project && grep -qE '(^|[[:space:]])push([[:space:]]|$)' <<<"$mseg"; then

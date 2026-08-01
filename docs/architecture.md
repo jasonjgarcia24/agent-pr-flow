@@ -37,9 +37,12 @@ tool:
 
   It **fails closed** without `jq`, and every rule matches a normalized copy so quoting or prefixing
   can't slip a command past it.
-- **`post-bash-secret-scan.sh`** — a `PostToolUse` advisory tripwire that scans command output for
-  secret-shaped strings (cloud keys, tokens, private-key blocks) and warns without ever printing the
-  matched value.
+- **`post-bash-secret-scan.sh`** — a `PostToolUse` advisory tripwire that scans the command and its
+  output for secret-shaped strings (cloud keys, tokens, private-key blocks) and warns without ever
+  printing the matched value. Patterns split into two classes: **value** patterns (high-entropy key
+  material) scan everything, while **marker** patterns (zero-entropy structure like `"private_key"`)
+  are anchored to the real artifact and skip the command's own grep operand — a scanner that fires
+  on the phrase you searched for is reporting itself, not a leak.
 - **`lint-on-edit.sh`** — a `PostToolUse[Edit|Write]` hook that runs a configured lint command on
   each edited file; a `null` config value makes it a fast no-op.
 
@@ -153,3 +156,10 @@ environment, so an inline `VAR=1 command` never reaches them *and* is blocked ou
 merge) and F5 (trunk deletion) have **no** hatch. Agents never set these; when a legitimate command
 trips a guard, the remedy is to author the content with editor tools instead of a shell heredoc, not
 to flip a hatch.
+
+D0 draws one line the other rules don't: a git/gh **message body** — a quoted-delimiter heredoc fed
+to `-F -`/`--body-file -`, or the inert quoted value of `-m`/`--body`/`--title` — is prose that is
+stored, never parsed, so naming a hatch in a commit message is not an attempt to set one. That
+carve-out is D0-only and gated on the command's first word being `git` or `gh`; every other rule
+still scans heredoc and quoted bodies, and any assignment reachable by a shell (command position, an
+unquoted heredoc, a `$(…)`-bearing value, a sibling segment, any other program) still blocks.

@@ -247,6 +247,68 @@ t "D1 \$* positional glue blocked"            2 "git ${pStar}reset --hard"
 t "D1 braced \${@} glue blocked"              2 "git ${pAtB}reset --hard"
 t "D1 \$1 low-boundary glue blocked"          2 "git ${p1}reset --hard"
 
+echo "== SAD-552: D0 separates a MENTION of a marker from an ASSIGNMENT =="
+# A git/gh MESSAGE body is prose — stored, never parsed as a command. The two
+# provably-inert regions (quoted-delimiter heredoc fed to a stdin message
+# operand; inert quoted value of a message flag) are blanked before D0 matches,
+# and ONLY when the command's first word is git/gh. Everything else still blocks.
+TMPD0="$(mktemp -d)"; git -C "$TMPD0" init -q -b feature/d0
+git -C "$TMPD0" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+d0env="CLAUDE_PROJECT_DIR=$TMPD0"
+# -- the observed false positives (SAD-552) --
+hd_ok="$(printf "git commit -F - <<'MSG'\nfix(land): document the LAND_PR_TEST=1 seam\n\nIt is read by land-pr.sh; ambient env only.\nMSG")"
+t "D0 FP: quoted-heredoc commit message mention allowed" 0 "$hd_ok" "$d0env" "$TMPD0"
+t "D0 FP: single-quoted -m mention allowed"     0 "git commit -m 'docs: describe the LAND_PR_TEST=1 seam'" "$d0env" "$TMPD0"
+t "D0 FP: inert double-quoted -m mention allowed" 0 'git commit -m "docs: the ALLOW_MAIN_PUSH=1 hatch is Jason-only"' "$d0env" "$TMPD0"
+t "D0 FP: gh --body mention allowed"            0 "gh pr create --body 'sets LAND_PR_SELFTEST=1 in CI'" "$d0env" "$TMPD0"
+t "D0 FP: gh api -f body= mention allowed"      0 "gh api -X PATCH repos/o/r/pulls/1 -f body='the LAND_PR_TEST=1 seam'" "$d0env" "$TMPD0"
+# -- adversarial: the control must still fire --
+t "D0 ADV: bare inline assignment still blocked" 2 'LAND_PR_TEST=1 tools/dev/land-pr.sh 5' "$d0env" "$TMPD0"
+t "D0 ADV: bash -c wrapper still blocked"       2 "bash -c 'LAND_PR_TEST=1 tools/dev/land-pr.sh 5'" "$d0env" "$TMPD0"
+t "D0 ADV: eval wrapper still blocked"          2 'eval "LAND_PR_TEST=1 tools/dev/land-pr.sh 5"' "$d0env" "$TMPD0"
+t "D0 ADV: \$( ) inside -m value still blocked" 2 'git commit -m "note $(LAND_PR_TEST=1 tools/dev/land-pr.sh 5)"' "$d0env" "$TMPD0"
+t "D0 ADV: backtick inside -m value still blocked" 2 'git commit -m "note `LAND_PR_TEST=1 tools/dev/land-pr.sh 5`"' "$d0env" "$TMPD0"
+t "D0 ADV: \${ } inside -m value still blocked" 2 'git commit -m "note ${x:-LAND_PR_TEST=1}"' "$d0env" "$TMPD0"
+hd_raw="$(printf "git commit -F - <<MSG\nLAND_PR_TEST=1 tools/dev/land-pr.sh 5\nMSG")"
+t "D0 ADV: UNQUOTED heredoc delimiter still blocked" 2 "$hd_raw" "$d0env" "$TMPD0"
+hd_two="$(printf "git commit -F - <<'A' \$(cat <<'B'\nLAND_PR_TEST=1 tools/dev/land-pr.sh 5\nA\nB")"
+t "D0 ADV: two heredocs -> mask nothing"        2 "$hd_two" "$d0env" "$TMPD0"
+hd_after="$(printf "git commit -F - <<'MSG'\nprose only\nMSG\nLAND_PR_TEST=1 tools/dev/land-pr.sh 5")"
+t "D0 ADV: line AFTER the heredoc terminator still blocked" 2 "$hd_after" "$d0env" "$TMPD0"
+hd_op="$(printf "git commit -F - <<'MSG' LAND_PR_TEST=1\nprose only\nMSG")"
+t "D0 ADV: operator LINE itself still scanned"  2 "$hd_op" "$d0env" "$TMPD0"
+t "D0 ADV: sibling segment after a masked -m still blocked" 2 "git commit -m 'prose' ; LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
+t "D0 ADV: quoted arg NOT behind a message flag still blocked" 2 "git commit -m 'prose' 'LAND_PR_TEST=1 tools/dev/land-pr.sh'" "$d0env" "$TMPD0"
+t "D0 ADV: assignment after the closing quote still blocked" 2 "git commit -m 'prose' LAND_PR_TEST=1 tools/dev/land-pr.sh" "$d0env" "$TMPD0"
+t "D0 ADV: ssh -t value is NOT a message flag"  2 "ssh host -t 'LAND_PR_TEST=1 tools/dev/land-pr.sh 5'" "$d0env" "$TMPD0"
+t "D0 ADV: gh alias set (executes its arg) still blocked" 2 "gh alias set z '!LAND_PR_TEST=1 tools/dev/land-pr.sh 5'" "$d0env" "$TMPD0"
+t "D0 ADV: git config alias (executes its arg) still blocked" 2 "git config alias.z '!LAND_PR_TEST=1 tools/dev/land-pr.sh 5'" "$d0env" "$TMPD0"
+t "D0 ADV: printf-built script file still blocked" 2 "printf 'LAND_PR_TEST=1 tools/dev/land-pr.sh 5' > /tmp/run.sh" "$d0env" "$TMPD0"
+t "D0 ADV: non-git/gh first word -> no mask"    2 "echo x && git commit -m 'LAND_PR_TEST=1 seam'" "$d0env" "$TMPD0"
+t "D0 ADV: \$IFS-glued git defeats the gate (fail-safe: still blocked)" 2 "git${ifsB}commit -m 'LAND_PR_TEST=1 seam'" "$d0env" "$TMPD0"
+t "D0 ADV: wrapper before git -> no mask"       2 "sudo git commit -m 'LAND_PR_TEST=1 seam'" "$d0env" "$TMPD0"
+# -- the other rules keep scanning message bodies: only D0 got the carve-out --
+hd_rm="$(printf "git commit -F - <<'MSG'\nfix: stop the rm -rf / footgun\nMSG")"
+t "D0 carve-out is D0-ONLY: D3 still scans the heredoc body" 2 "$hd_rm" "$d0env" "$TMPD0"
+rm -rf "$TMPD0"
+
+echo "== SAD-552: F6 separates READING core.hooksPath from WRITING it =="
+t "F6 FP: bare read allowed"                    0 'git config core.hooksPath'
+t "F6 FP: --get-all read allowed"               0 'git config --get-all core.hooksPath'
+t "F6 FP: --get-regexp read allowed"            0 'git config --get-regexp core.hooksPath'
+t 'F6 FP: modern config-get read allowed'       0 'git config get core.hooksPath'
+t "F6 ADV: deprecated set still blocked"        2 'git config core.hooksPath /tmp/hooks'
+t "F6 ADV: --unset still blocked"               2 'git config --unset core.hooksPath'
+t "F6 ADV: --add still blocked"                 2 'git config --add core.hooksPath /tmp/h'
+t "F6 ADV: --replace-all still blocked"         2 'git config --replace-all core.hooksPath /tmp/h'
+t 'F6 ADV: modern config-set still blocked'     2 'git config set core.hooksPath /tmp/h'
+t 'F6 ADV: modern config-unset still blocked'   2 'git config unset core.hooksPath'
+t "F6 ADV: --type decoy before the value still blocked" 2 'git config --type path core.hooksPath /tmp/h'
+t "F6 ADV: -f <file> location flag still blocked" 2 'git config -f .git/config core.hooksPath /tmp/h'
+t "F6 ADV: --global set still blocked"          2 'git config --global core.hooksPath /tmp/h'
+t "F6 ADV: unknown value-flag over-counts -> still blocked" 2 'git config --comment note core.hooksPath /tmp/h'
+t "F6 set to .githooks still allowed"           0 'git config core.hooksPath .githooks'
+
 echo "== jq fail-closed =="
 out=$(mk 'echo hi' | env PATH=/nonexistent /bin/bash "$H/pre-bash-safety.sh" 2>&1); rc=$?
 if [ "$rc" = "2" ]; then echo "PASS  jq missing fails closed (rc=2)"; pass=$((pass+1)); else echo "FAIL  jq missing (rc=$rc) :: $out"; fail=$((fail+1)); fi
@@ -274,6 +336,29 @@ p "resend key shape tripped"         2 'cat .env' 'RESEND=re_xxxxxxxxxxxxxxxxxx'
 p "prose re_ boundary clean"         0 'echo x' 'genre_classification_results_ready_now'
 p "prose sk- boundary clean"         0 'echo x' 'task-sk-quarterly-report-generation-notes'
 p "test-harness PASS lines clean"    0 'bash tools/dev/test-hooks.sh' 'PASS  D1 reset --hard blocked (rc=2)'
+
+echo "== SAD-552: the scanner reports key MATERIAL, not the WORD for it =="
+PEM_HDR='-----BEGIN RSA PRIVATE KEY-----'
+SA_JSON='  "private_key": "-----BEGIN PRIVATE KEY-----xxxxxxxxxxxxxxxxxxxxxxxxxx\n",'
+# -- the observed false positives (SAD-552): a marker in the command's own
+#    search-pattern operand, and a marker in a pattern DEFINITION that was read.
+p "FP: grep for the PEM header PHRASE (no armour)" 0 "grep -rn 'BEGIN PRIVATE KEY' ." ''
+p "FP: grep for the full PEM armour (operand masked)" 0 "grep -rn -- '$PEM_HDR' /home/x/.ssh" ''
+p "FP: grep for the JSON key NAME"    0 'grep -rni "\"private_key\"" .claude/hooks' ''
+p "FP: hook pattern definitions in the output" 0 'cat .claude/hooks/post-bash-secret-scan.sh' \
+  'scan_marker "gcp-service-account" '"'"'"private_key"[[:space:]]*:[[:space:]]*"[^"]{20,}'"'"''
+p "FP: prose naming a private key"    0 'cat docs/setup.md' 'Download the JSON; it carries a private_key field.'
+p "FP: empty JSON key in a schema"    0 'cat schema.json' '{"private_key": ""}'
+# -- adversarial: real key material must still trip --
+p "ADV: PEM armour in output still tripped" 2 'cat id_rsa' "$PEM_HDR"
+p "ADV: PEM armour in a grep's OUTPUT still tripped" 2 "grep -rn 'PRIVATE' ." "certs/id.pem:1:$PEM_HDR"
+p "ADV: service-account JSON value still tripped" 2 'cat sa.json' "$SA_JSON"
+p "ADV: real key in a grep OPERAND still tripped (value class)" 2 "grep -rn '$FAKE_G' ." ''
+p "ADV: real PEM body in a grep operand caught by the generic pattern" 2 \
+  "grep -rn 'private_key\": \"MIIEvQIBADANBgkqhkiG9w0BA' sa.json" ''
+p "ADV: sibling non-grep segment still scanned" 2 "grep -rn x . && echo '$PEM_HDR' > k.pem" ''
+p "ADV: marker in output beside a masked grep operand still tripped" 2 \
+  "grep -rn 'BEGIN PRIVATE KEY' ." "id_rsa:1:$PEM_HDR"
 
 echo "== .githooks/pre-push (SAD-177) =="
 PP="$ROOT/.githooks/pre-push"
