@@ -156,8 +156,9 @@ if [[ "$cmd" =~ ^[[:space:]]*([^[:space:]]*/)?(git|gh)[[:space:]] ]]; then
   fi
   # (b) inert message-flag values -> blanked. Newlines collapse to spaces first
   # so a multi-line quoted value is one region for the (quote-bounded, so never
-  # over-reaching) match; `\n` and ` ` are the same boundary class to D0's
-  # (^|[[:space:]]) anchor, so collapsing can only expose a marker, never hide one.
+  # over-reaching) match; `\n` and ` ` are both non-identifier chars, so they are
+  # the same boundary class to D0's anchor below and collapsing can only expose a
+  # marker, never hide one.
   d0_flags='((^|[[:space:]])((-m|-b|--message|--body|--subject|--title|--notes|--description)([[:space:]]+|=)|(-f|-F|--field|--raw-field)[[:space:]]+(body|title|message)=))'
   d0_text="$(tr '\n' ' ' <<<"$d0_text")"
   d0_text="$(sed -E "s/$d0_flags'[^']*'/\1''/g" <<<"$d0_text")"
