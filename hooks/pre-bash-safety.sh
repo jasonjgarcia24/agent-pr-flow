@@ -173,6 +173,15 @@ fi
 # identifier char still does not, so MY_LAND_PR_TEST= stays unmatched). This is
 # a TIGHTENING shipped alongside the carve-out above — D0 gets broader in
 # command contexts and narrower only inside a git/gh message body.
+#
+# The widened boundary covers every runtime-vanishing glue whose leftover char is
+# a non-identifier (`${IFS}X=1` leaves `}`, `$@X=1` leaves `@`) but NOT the bare
+# positional `$1`-`$9`, whose leftover char is a DIGIT — so `$9SEAM=1 land-pr.sh`
+# expanded to a live assignment and D0 never saw it. D0 therefore gets the same
+# SAD-258/357 normalization the D/F rules use, applied AFTER the masking above so
+# it can never resurrect a blanked message region. It only ever INSERTS
+# boundaries: it can expose a hidden marker, never hide one.
+d0_text="$(sed -E 's/\$\{IFS[^}]*\}/ /g; s/\$IFS([^A-Za-z0-9_]|$)/ \1/g; s/\$\{[1-9@*]\}/ /g; s/\$[1-9@*]/ /g' <<<"$d0_text")"
 mapfile -t d0_segments < <(sed -E 's/&&|\|\||;|\||&/\n/g' <<<"$d0_text")
 for seg in "${d0_segments[@]}"; do
   if grep -qE '(^|[^A-Za-z0-9_])(SKIP_BASH_SAFETY|ALLOW_DESTRUCTIVE|ALLOW_MAIN_PUSH|ALLOW_DISABLED_STATION|ADB_NO_SERIAL_OK|LAND_PR_CFG_OVERRIDE|LAND_PR_SELFTEST|LAND_PR_SADTEST|LAND_PR_TEST)=' <<<"$seg"; then

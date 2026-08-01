@@ -287,6 +287,21 @@ t "D0 ADV: printf-built script file still blocked" 2 "printf 'LAND_PR_TEST=1 too
 t "D0 ADV: non-git/gh first word -> no mask"    2 "echo x && git commit -m 'LAND_PR_TEST=1 seam'" "$d0env" "$TMPD0"
 t "D0 ADV: \$IFS-glued git defeats the gate (fail-safe: still blocked)" 2 "git${ifsB}commit -m 'LAND_PR_TEST=1 seam'" "$d0env" "$TMPD0"
 t "D0 ADV: wrapper before git -> no mask"       2 "sudo git commit -m 'LAND_PR_TEST=1 seam'" "$d0env" "$TMPD0"
+# -- runtime-vanishing glue in front of the marker (SAD-258/357 shapes). The
+#    $1-$9 form leaves a DIGIT behind, which the identifier boundary alone does
+#    not open -- D0 runs the same normalization the D/F rules use.
+t "D0 ADV: bare \$9 glue before the marker still blocked"   2 "${p9}LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
+t "D0 ADV: braced \${9} glue before the marker still blocked" 2 "${p9b}LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
+t "D0 ADV: \$@ glue before the marker still blocked"        2 "${pAt}LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
+t "D0 ADV: \${IFS} glue before the marker still blocked"    2 "${ifsB}LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
+# Unbraced $IFS is a separator only when NOT followed by an identifier char
+# (SAD-258 specificity, same rule as the $IFSTOP case above): $IFSLAND_PR_TEST
+# is a DIFFERENT variable name, and the line bash ends up running is `=1 ...`,
+# not an assignment -- so this is correctly NOT a marker.
+t "D0 \$IFS-extended name is a different variable, not glue"  0 "${ifsU}LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
+t "D0 ADV: mid-command \$9 glue still blocked"              2 "echo hi && x${p9}LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
+# Specificity: an IDENTIFIER char before the name is a different variable, not glue.
+t "D0 identifier-prefixed name is NOT the marker"           0 'echo MY_LAND_PR_TEST=1' "$d0env" "$TMPD0"
 # -- the other rules keep scanning message bodies: only D0 got the carve-out --
 hd_rm="$(printf "git commit -F - <<'MSG'\nfix: stop the rm -rf / footgun\nMSG")"
 t "D0 carve-out is D0-ONLY: D3 still scans the heredoc body" 2 "$hd_rm" "$d0env" "$TMPD0"
