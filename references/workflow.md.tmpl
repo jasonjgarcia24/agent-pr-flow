@@ -160,9 +160,19 @@ commit messages). If a legitimate command trips a rule — e.g. authoring a doc 
 `git push origin {{DEFAULT_BRANCH}}` — author the content with the **Write/Edit tools**, or
 `git commit -F <file>`; never bypass. **Do NOT reword around a rule.** Rewording is
 indistinguishable from evasion to any downstream classifier, and it hides the defect: a rule that
-fires on prose is a bug to file, not a hurdle to route around (SAD-552). D0 already carves out a
-git/gh MESSAGE body — prose naming a hatch is fine inside a quoted-delimiter heredoc
-(`<<'MSG'` fed to `-F -`) or an inert quoted `-m` / `--body` value.
+fires on prose is a bug to file, not a hurdle to route around (SAD-552).
+
+**The sanctioned remedies, in order — none of them changes what you are saying:**
+1. **Put the text in a file and pass a PATH.** `git commit -F <file>` / `gh pr create --body-file
+   <file>`, with the file authored by **Write/Edit**. The prose never enters a Bash command line,
+   so no scanner ever sees it. This is the answer for commit messages, PR bodies and docs.
+2. **Search with the Grep tool, not a Bash `grep`.** `grep -rn 'SOME_HATCH=1' tools/` trips D0
+   because the hook cannot tell searching for a marker from setting one; the Grep tool does not go
+   through the Bash gate at all. Same for `sed -i` rewrites — use Edit.
+3. **If neither fits, say so and file it.** SAD-552 tried to teach D0 which text was "only prose"
+   and both reviewers broke the carve-out with working exploits — a regex cannot decide which
+   program owns a token. So the hook will keep over-blocking here by design, and the escape is a
+   different authoring path, never a reworded sentence.
 
 ## §7 Close-out — the 3 surfaces
 

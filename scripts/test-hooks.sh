@@ -247,64 +247,57 @@ t "D1 \$* positional glue blocked"            2 "git ${pStar}reset --hard"
 t "D1 braced \${@} glue blocked"              2 "git ${pAtB}reset --hard"
 t "D1 \$1 low-boundary glue blocked"          2 "git ${p1}reset --hard"
 
-echo "== SAD-552: D0 separates a MENTION of a marker from an ASSIGNMENT =="
-# A git/gh MESSAGE body is prose — stored, never parsed as a command. The two
-# provably-inert regions (quoted-delimiter heredoc fed to a stdin message
-# operand; inert quoted value of a message flag) are blanked before D0 matches,
-# and ONLY when the command's first word is git/gh. Everything else still blocks.
+echo "== SAD-552: D0 — no prose carve-out; boundary tightening + glue normalization =="
+# The reported D0 false positive (a commit message that DOCUMENTS a seam) is NOT
+# fixed by a hook change: two independent reviewers broke the masking that tried
+# to (see the hook header). It is remediated by authoring the message with
+# Write/Edit and passing a PATH -- git commit -F <file> -- which never puts the
+# prose on a Bash command line. These rows pin that D0 stays broad.
 TMPD0="$(mktemp -d)"; git -C "$TMPD0" init -q -b feature/d0
 git -C "$TMPD0" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 d0env="CLAUDE_PROJECT_DIR=$TMPD0"
-# -- the observed false positives (SAD-552) --
-hd_ok="$(printf "git commit -F - <<'MSG'\nfix(land): document the LAND_PR_TEST=1 seam\n\nIt is read by land-pr.sh; ambient env only.\nMSG")"
-t "D0 FP: quoted-heredoc commit message mention allowed" 0 "$hd_ok" "$d0env" "$TMPD0"
-t "D0 FP: single-quoted -m mention allowed"     0 "git commit -m 'docs: describe the LAND_PR_TEST=1 seam'" "$d0env" "$TMPD0"
-t "D0 FP: inert double-quoted -m mention allowed" 0 'git commit -m "docs: the ALLOW_MAIN_PUSH=1 hatch is Jason-only"' "$d0env" "$TMPD0"
-t "D0 FP: gh --body mention allowed"            0 "gh pr create --body 'sets LAND_PR_SELFTEST=1 in CI'" "$d0env" "$TMPD0"
-t "D0 FP: gh api -f body= mention allowed"      0 "gh api -X PATCH repos/o/r/pulls/1 -f body='the LAND_PR_TEST=1 seam'" "$d0env" "$TMPD0"
-# -- adversarial: the control must still fire --
-t "D0 ADV: bare inline assignment still blocked" 2 'LAND_PR_TEST=1 tools/dev/land-pr.sh 5' "$d0env" "$TMPD0"
-t "D0 ADV: bash -c wrapper still blocked"       2 "bash -c 'LAND_PR_TEST=1 tools/dev/land-pr.sh 5'" "$d0env" "$TMPD0"
-t "D0 ADV: eval wrapper still blocked"          2 'eval "LAND_PR_TEST=1 tools/dev/land-pr.sh 5"' "$d0env" "$TMPD0"
-t "D0 ADV: \$( ) inside -m value still blocked" 2 'git commit -m "note $(LAND_PR_TEST=1 tools/dev/land-pr.sh 5)"' "$d0env" "$TMPD0"
-t "D0 ADV: backtick inside -m value still blocked" 2 'git commit -m "note `LAND_PR_TEST=1 tools/dev/land-pr.sh 5`"' "$d0env" "$TMPD0"
-t "D0 ADV: \${ } inside -m value still blocked" 2 'git commit -m "note ${x:-LAND_PR_TEST=1}"' "$d0env" "$TMPD0"
-hd_raw="$(printf "git commit -F - <<MSG\nLAND_PR_TEST=1 tools/dev/land-pr.sh 5\nMSG")"
-t "D0 ADV: UNQUOTED heredoc delimiter still blocked" 2 "$hd_raw" "$d0env" "$TMPD0"
-hd_two="$(printf "git commit -F - <<'A' \$(cat <<'B'\nLAND_PR_TEST=1 tools/dev/land-pr.sh 5\nA\nB")"
-t "D0 ADV: two heredocs -> mask nothing"        2 "$hd_two" "$d0env" "$TMPD0"
-hd_after="$(printf "git commit -F - <<'MSG'\nprose only\nMSG\nLAND_PR_TEST=1 tools/dev/land-pr.sh 5")"
-t "D0 ADV: line AFTER the heredoc terminator still blocked" 2 "$hd_after" "$d0env" "$TMPD0"
-hd_op="$(printf "git commit -F - <<'MSG' LAND_PR_TEST=1\nprose only\nMSG")"
-t "D0 ADV: operator LINE itself still scanned"  2 "$hd_op" "$d0env" "$TMPD0"
-t "D0 ADV: sibling segment after a masked -m still blocked" 2 "git commit -m 'prose' ; LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
-t "D0 ADV: quoted arg NOT behind a message flag still blocked" 2 "git commit -m 'prose' 'LAND_PR_TEST=1 tools/dev/land-pr.sh'" "$d0env" "$TMPD0"
-t "D0 ADV: assignment after the closing quote still blocked" 2 "git commit -m 'prose' LAND_PR_TEST=1 tools/dev/land-pr.sh" "$d0env" "$TMPD0"
-t "D0 ADV: ssh -t value is NOT a message flag"  2 "ssh host -t 'LAND_PR_TEST=1 tools/dev/land-pr.sh 5'" "$d0env" "$TMPD0"
-t "D0 ADV: gh alias set (executes its arg) still blocked" 2 "gh alias set z '!LAND_PR_TEST=1 tools/dev/land-pr.sh 5'" "$d0env" "$TMPD0"
-t "D0 ADV: git config alias (executes its arg) still blocked" 2 "git config alias.z '!LAND_PR_TEST=1 tools/dev/land-pr.sh 5'" "$d0env" "$TMPD0"
-t "D0 ADV: printf-built script file still blocked" 2 "printf 'LAND_PR_TEST=1 tools/dev/land-pr.sh 5' > /tmp/run.sh" "$d0env" "$TMPD0"
-t "D0 ADV: non-git/gh first word -> no mask"    2 "echo x && git commit -m 'LAND_PR_TEST=1 seam'" "$d0env" "$TMPD0"
-t "D0 ADV: \$IFS-glued git defeats the gate (fail-safe: still blocked)" 2 "git${ifsB}commit -m 'LAND_PR_TEST=1 seam'" "$d0env" "$TMPD0"
-t "D0 ADV: wrapper before git -> no mask"       2 "sudo git commit -m 'LAND_PR_TEST=1 seam'" "$d0env" "$TMPD0"
-# -- runtime-vanishing glue in front of the marker (SAD-258/357 shapes). The
-#    $1-$9 form leaves a DIGIT behind, which the identifier boundary alone does
-#    not open -- D0 runs the same normalization the D/F rules use.
-t "D0 ADV: bare \$9 glue before the marker still blocked"   2 "${p9}LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
-t "D0 ADV: braced \${9} glue before the marker still blocked" 2 "${p9b}LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
-t "D0 ADV: \$@ glue before the marker still blocked"        2 "${pAt}LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
-t "D0 ADV: \${IFS} glue before the marker still blocked"    2 "${ifsB}LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
-# Unbraced $IFS is a separator only when NOT followed by an identifier char
-# (SAD-258 specificity, same rule as the $IFSTOP case above): $IFSLAND_PR_TEST
-# is a DIFFERENT variable name, and the line bash ends up running is `=1 ...`,
-# not an assignment -- so this is correctly NOT a marker.
-t "D0 \$IFS-extended name is a different variable, not glue"  0 "${ifsU}LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
-t "D0 ADV: mid-command \$9 glue still blocked"              2 "echo hi && x${p9}LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
-# Specificity: an IDENTIFIER char before the name is a different variable, not glue.
-t "D0 identifier-prefixed name is NOT the marker"           0 'echo MY_LAND_PR_TEST=1' "$d0env" "$TMPD0"
-# -- the other rules keep scanning message bodies: only D0 got the carve-out --
+# -- Barb PoC #1: the heredoc is co-located with `git` but OWNED by `bash`.
+hd_barb="$(printf "git log -F - ; bash <<'MSG'\nLAND_PR_TEST=1 tools/dev/land-pr.sh 5\nMSG")"
+t "D0 PoC(Barb): heredoc owned by bash on a git-led line" 2 "$hd_barb" "$d0env" "$TMPD0"
+hd_barb2="$(printf 'gh pr view 1 --body-file - ; bash <<"MSG"\nLAND_PR_TEST=1 tools/dev/land-pr.sh 5\nMSG')"
+t "D0 PoC(Barb): same shape, gh + double-quoted delimiter" 2 "$hd_barb2" "$d0env" "$TMPD0"
+# -- Watson PoC: a decoy message flag INSIDE a quoted string skews quote pairing.
+t "D0 PoC(Watson): quoted decoy -m skews quote pairing"   2 "git status && echo 'a -m ' && LAND_PR_TEST=1 tools/dev/land-pr.sh 434 && echo 'z'" "$d0env" "$TMPD0"
+t "D0 PoC(Watson): same with a --body decoy"              2 "git status && echo 'a --body ' && LAND_PR_TEST=1 tools/dev/land-pr.sh 434 && echo 'z'" "$d0env" "$TMPD0"
+# -- a message body that NAMES a marker is still blocked, deliberately. The
+#    remedy is `git commit -F <path>`, not a hook carve-out and not a reword.
+hd_prose="$(printf "git commit -F - <<'MSG'\nfix(land): document the LAND_PR_TEST=1 seam\nMSG")"
+t "D0 prose-in-heredoc still blocked (remedy: -F <path>)" 2 "$hd_prose" "$d0env" "$TMPD0"
+t "D0 prose in -m still blocked (remedy: -F <path>)"      2 "git commit -m 'docs: describe the LAND_PR_TEST=1 seam'" "$d0env" "$TMPD0"
+t "D0 -F <path> is the sanctioned form"                   0 'git commit -F /tmp/msg.txt' "$d0env" "$TMPD0"
+# -- the [^A-Za-z0-9_] boundary: assignments hiding immediately after a quote.
+t "D0 ADV: bash -c wrapper blocked"          2 "bash -c 'LAND_PR_TEST=1 tools/dev/land-pr.sh 5'" "$d0env" "$TMPD0"
+t "D0 ADV: eval wrapper blocked"             2 'eval "LAND_PR_TEST=1 tools/dev/land-pr.sh 5"' "$d0env" "$TMPD0"
+t "D0 ADV: printf-built script file blocked" 2 "printf 'LAND_PR_TEST=1 tools/dev/land-pr.sh 5' > /tmp/run.sh" "$d0env" "$TMPD0"
+t "D0 ADV: ssh -t value blocked"             2 "ssh host -t 'LAND_PR_TEST=1 tools/dev/land-pr.sh 5'" "$d0env" "$TMPD0"
+t "D0 ADV: gh alias set (executes its arg) blocked"     2 "gh alias set z '!LAND_PR_TEST=1 tools/dev/land-pr.sh 5'" "$d0env" "$TMPD0"
+t "D0 ADV: git config alias (executes its arg) blocked" 2 "git config alias.z '!LAND_PR_TEST=1 tools/dev/land-pr.sh 5'" "$d0env" "$TMPD0"
+t "D0 ADV: \$( ) inside a -m value blocked"  2 'git commit -m "note $(LAND_PR_TEST=1 x)"' "$d0env" "$TMPD0"
+t "D0 ADV: subshell paren boundary blocked"  2 '(LAND_PR_TEST=1 tools/dev/land-pr.sh 5)' "$d0env" "$TMPD0"
+# -- runtime-vanishing glue: the $1-$9 form leaves a DIGIT, which the identifier
+#    boundary alone does not open, so D0 runs the SAD-258/357 normalization too.
+t "D0 ADV: bare \$9 glue blocked"            2 "${p9}LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
+t "D0 ADV: braced \${9} glue blocked"        2 "${p9b}LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
+t "D0 ADV: \$@ glue blocked"                 2 "${pAt}LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
+t "D0 ADV: \${IFS} glue blocked"             2 "${ifsB}LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
+t "D0 ADV: mid-command \$9 glue blocked"     2 "echo hi && x${p9}LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
+# -- specificity: an identifier char before the name is a DIFFERENT variable.
+t "D0 identifier-prefixed name is NOT the marker" 0 'echo MY_LAND_PR_TEST=1' "$d0env" "$TMPD0"
+# Unbraced $IFS followed by an identifier char is not a separator (SAD-258, same
+# rule as $IFSTOP): $IFSLAND_PR_TEST names another variable and bash ends up running
+# `=1 ...`, not an assignment.
+t "D0 \$IFS-extended name is a different variable, not glue" 0 "${ifsU}LAND_PR_TEST=1 tools/dev/land-pr.sh 5" "$d0env" "$TMPD0"
+# -- ACCEPTED COST of the widened boundary: a Bash command that SEARCHES for a
+#    marker now blocks too. Sanctioned remedy is the Grep tool, not a reword.
+t "D0 known FP: a Bash grep for the marker blocks (use the Grep tool)" 2 "grep -rn 'LAND_PR_TEST=1' tools/dev/" "$d0env" "$TMPD0"
+# -- the D/F rules still scan embedded text; nothing was carved out for anyone.
 hd_rm="$(printf "git commit -F - <<'MSG'\nfix: stop the rm -rf / footgun\nMSG")"
-t "D0 carve-out is D0-ONLY: D3 still scans the heredoc body" 2 "$hd_rm" "$d0env" "$TMPD0"
+t "D3 still scans a heredoc body" 2 "$hd_rm" "$d0env" "$TMPD0"
 rm -rf "$TMPD0"
 
 echo "== SAD-552: F6 separates READING core.hooksPath from WRITING it =="
@@ -323,6 +316,23 @@ t "F6 ADV: -f <file> location flag still blocked" 2 'git config -f .git/config c
 t "F6 ADV: --global set still blocked"          2 'git config --global core.hooksPath /tmp/h'
 t "F6 ADV: unknown value-flag over-counts -> still blocked" 2 'git config --comment note core.hooksPath /tmp/h'
 t "F6 set to .githooks still allowed"           0 'git config core.hooksPath .githooks'
+# Barb/Watson: git's parse-options accepts any UNAMBIGUOUS PREFIX, so an
+# enumerate-the-writes classifier fails open on every spelling it lacks. The
+# classifier is affirmative-read / fail-closed, so an abbreviation is a write.
+t 'F6 ADV: --unset- abbreviation blocked'        2 'git config --unset- core.hooksPath'
+t 'F6 ADV: --unset-a abbreviation blocked'       2 'git config --unset-a core.hooksPath'
+t 'F6 ADV: --unset-al abbreviation blocked'      2 'git config --unset-al core.hooksPath'
+t 'F6 ADV: --unse abbreviation blocked'          2 'git config --unse core.hooksPath'
+t 'F6 ADV: abbreviation behind a location flag blocked' 2 'git config --file .git/config --unset-a core.hooksPath'
+t 'F6 ADV: unknown long option is a write'       2 'git config --xyzzy core.hooksPath'
+# The .githooks exemption is bound to the VALUE BEING SET, not to the text
+# appearing anywhere in the segment (Barb: a trailing shell comment, or
+# --comment's own value, satisfied the old free-text grep while a different
+# path was written).
+t 'F6 ADV: .githooks in a trailing comment does not exempt' 2 'git config core.hooksPath /tmp/evilhooks # core.hooksPath .githooks'
+t 'F6 ADV: .githooks as --comment value does not exempt'    2 "git config --comment 'core.hooksPath .githooks' core.hooksPath /tmp/evilhooks"
+t 'F6 modern set to .githooks still allowed'     0 'git config set core.hooksPath .githooks'
+t 'F6 read with a scope flag allowed'            0 'git config --global --get core.hooksPath'
 
 echo "== jq fail-closed =="
 out=$(mk 'echo hi' | env PATH=/nonexistent /bin/bash "$H/pre-bash-safety.sh" 2>&1); rc=$?
@@ -374,6 +384,23 @@ p "ADV: real PEM body in a grep operand caught by the generic pattern" 2 \
 p "ADV: sibling non-grep segment still scanned" 2 "grep -rn x . && echo '$PEM_HDR' > k.pem" ''
 p "ADV: marker in output beside a masked grep operand still tripped" 2 \
   "grep -rn 'BEGIN PRIVATE KEY' ." "id_rsa:1:$PEM_HDR"
+# Barb HIGH / Watson I3: the first cut claimed the generic 12+-char pattern was
+# the backstop for a masked PEM. It is not -- private[_-]?key cannot match
+# "PRIVATE KEY" and "-----BEGIN" is 10 chars. A full key transited a grep operand
+# with NO tripwire. The VALUE-class private-key-material pattern (armour + body,
+# never masked) is what makes the coarse marker masking safe.
+PEM_BODY="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+p "ADV: full PEM in a grep operand tripped (VALUE class)" 2 "grep -rn -- '$PEM_HDR$PEM_BODY' /home/x/.ssh" ''
+p "ADV: full PEM laundered behind a decoy pattern tripped" 2 "grep -q zzz '$PEM_HDR$PEM_BODY'" ''
+p "ADV: rg operand with a full PEM tripped"               2 "rg -e '$PEM_HDR$PEM_BODY' ." ''
+p "ADV: service-account JSON in a grep operand tripped"   2 "grep -rn '{\"private_key\":\"$PEM_HDR$PEM_BODY\"}' ." ''
+p "FP: armour with NO body in a grep operand stays clean" 0 "grep -rn -- '$PEM_HDR' /home/x/.ssh" ''
+# Watson I4: pinning exactly five hyphens narrowed detection past the OLD
+# pattern. RFC 7468 armour is a hyphen run; these used to trip and must again.
+p "ADV: four-hyphen armour tripped"       2 'cat k.pem' '---- BEGIN ENCRYPTED PRIVATE KEY ----'
+p "ADV: four-hyphen tight armour tripped" 2 'cat k.pem' '----BEGIN PRIVATE KEY----'
+p "ADV: six-hyphen armour tripped"        2 'cat k.pem' '------BEGIN PRIVATE KEY------'
+p "ADV: SSH2-style digit label tripped"   2 'cat k.pem' '-----BEGIN SSH2 PRIVATE KEY-----'
 
 echo "== .githooks/pre-push (SAD-177) =="
 PP="$ROOT/.githooks/pre-push"

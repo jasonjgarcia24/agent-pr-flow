@@ -157,9 +157,12 @@ merge) and F5 (trunk deletion) have **no** hatch. Agents never set these; when a
 trips a guard, the remedy is to author the content with editor tools instead of a shell heredoc, not
 to flip a hatch.
 
-D0 draws one line the other rules don't: a git/gh **message body** — a quoted-delimiter heredoc fed
-to `-F -`/`--body-file -`, or the inert quoted value of `-m`/`--body`/`--title` — is prose that is
-stored, never parsed, so naming a hatch in a commit message is not an attempt to set one. That
-carve-out is D0-only and gated on the command's first word being `git` or `gh`; every other rule
-still scans heredoc and quoted bodies, and any assignment reachable by a shell (command position, an
-unquoted heredoc, a `$(…)`-bearing value, a sibling segment, any other program) still blocks.
+**D0 has no "it's only prose" carve-out, and must not grow one.** SAD-552 tried: a commit message
+that *documents* a hatch is stored, never parsed, so blanking a quoted-delimiter heredoc body or an
+inert quoted `-m` value before matching looked provably safe. Two independent reviewers broke it
+with working exploits — a heredoc co-located with `git` but *owned* by `bash`, and a decoy `-m`
+inside a quoted string that skews the masker's quote pairing away from bash's. Both reduce to the
+same thing: **a regex cannot decide which program owns a token.** The masking was reverted; do not
+reintroduce it without a real shell tokenizer, and if you build one it belongs to D0, F1 and F6
+together. The remedy for the false positive needs no hook change: author the text with Write/Edit
+and pass a path (`git commit -F <file>`), and search with the Grep tool rather than a Bash `grep`.

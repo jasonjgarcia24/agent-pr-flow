@@ -98,95 +98,66 @@ mapfile -t segments < <(sed -E 's/&&|\|\||;|\||&/\n/g' <<<"$cmd")
 # D0 blocks an assignment to a hatch/test-seam name. SKIP_BASH_SAFETY & friends
 # are read from THIS hook's ambient env so an inline form never works anyway —
 # but the LAND_PR_* seams are read by land-pr.sh's OWN process, so an inline
-# `LAND_PR_TEST=1 tools/dev/land-pr.sh 5` genuinely takes effect. D0 is a real
-# control, not just a signal, and it stays maximally broad.
+# `LAND_PR_TEST=1 tools/dev/land-pr.sh 5` genuinely takes effect, unlocking
+# LAND_PR_CFG_OVERRIDE and with it the whole tiered-review gate. D0 is a REAL
+# control, not just a signal, and it stays maximally broad. It runs as a
+# pre-pass over the WHOLE command (not per-segment) so nothing depends on where
+# the naive splitter happens to cut.
 #
-# SAD-552 — "MENTIONS the marker" is not "SETS the marker". A commit message or
-# PR body that documents a seam is prose; it is stored, never parsed as a
-# command. Exactly two provably-INERT regions are blanked before D0 matches:
+# ⚠ SAD-552 — WHY THERE IS NO "IT'S ONLY PROSE" CARVE-OUT HERE, AND WHY THERE
+# MUST NOT BE ONE. D0's one reported false positive was a commit message that
+# DOCUMENTED a seam ("the LAND_PR_TEST=1 env var is read by land-pr.sh"). The
+# first cut of this fix blanked two regions that looked provably inert before
+# matching — a quoted-delimiter heredoc body feeding `-F -`, and the quoted
+# value of a `-m`/`--body`-style flag — both gated on the command's first word
+# being `git` or `gh`. Barb and Watson each broke it, independently, with
+# working proofs:
 #
-#   (a) a quoted-delimiter heredoc body — <<'EOF' / <<"EOF" / <<\EOF perform NO
-#       expansion and NO command substitution, so the body is literal text —
-#       whose operator line reads the message from STDIN (-F - / --file - /
-#       --body-file - / --input -). Requires the WHOLE command to carry exactly
-#       ONE heredoc operator: with two, delimiter tracking could misalign the
-#       body region, so ≠1 blanks nothing.
-#   (b) the INERT literal value of a message-carrying flag: single-quoted, or
-#       double-quoted with no `$` and no backtick. A value holding $(…), `…`,
-#       or ${…} is NOT inert and is left in place for D0 to see.
+#   git log -F - ; bash <<'MSG'          # first word is `git`, one heredoc,
+#   LAND_PR_TEST=1 tools/dev/land-pr.sh 5 # `-F -` present as free text — but
+#   MSG                                   # bash, not git, owns that heredoc
 #
-# BOTH are gated on the command's FIRST WORD being `git` or `gh` (path prefix
-# allowed, nothing else — no wrapper, no interpreter, no eval can be the
-# program). Under that gate no listed flag's value is ever executed: git/gh
-# store a message, they do not run it. `gh alias set '!cmd'` and
-# `git config alias.x '!cmd'` DO execute their argument — neither sits behind a
-# message flag, so neither is masked. `-t` is deliberately NOT in the flag list
-# (ssh -t '<cmd>' executes its value).
+#   git status && echo 'a -m ' && LAND_PR_TEST=1 tools/dev/land-pr.sh 5 && echo 'z'
+#   # the decoy `-m ` sits INSIDE a quoted string, so sed's quote pairing and
+#   # bash's disagree and the mask eats live command text
 #
-# Net effect on what gets through: prose naming a marker inside a git/gh message
-# body. An assignment anywhere else — command position, an unquoted heredoc, a
-# $(…)-bearing value, a sibling segment, any non-git/gh program — still blocks.
+# Both reduce to one root cause: a REGEX CANNOT DECIDE WHICH PROGRAM OWNS A
+# TOKEN. The region blanked is chosen by pattern proximity; bash chooses by
+# argument ownership, and the two diverge under separators, newlines and quote
+# parity. Patching each proof only moves the seam. **Do not reintroduce a
+# masking carve-out here without a real shell tokenizer** — and if you build
+# one, it belongs to D0, F1 and F6 together, not to one rule.
+#
+# The sanctioned remedy for the false positive needs NO hook change and is
+# already the documented practice (workflow.md §6): author the message with the
+# Write/Edit tools and pass a PATH — `git commit -F <file>` — so the prose never
+# enters a Bash command line at all. Same for searching: use the Grep tool, not
+# `grep 'SEAM=1' …` in Bash. Reword nothing.
 d0_text="$cmd"
-if [[ "$cmd" =~ ^[[:space:]]*([^[:space:]]*/)?(git|gh)[[:space:]] ]]; then
-  # (a) heredoc body -> blanked
-  mapfile -t hd_ops < <(grep -oE "<<-?[[:space:]]*(\"[A-Za-z_][A-Za-z0-9_]*\"|'[A-Za-z_][A-Za-z0-9_]*'|\\\\[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*)" <<<"$cmd")
-  if [ "${#hd_ops[@]}" -eq 1 ]; then
-    hd_raw="${hd_ops[0]#*<<}"; hd_raw="${hd_raw#-}"
-    hd_raw="$(sed -E 's/^[[:space:]]+//' <<<"$hd_raw")"
-    hd_q="${hd_raw:0:1}"
-    hd_delim="${hd_raw//\'/}"; hd_delim="${hd_delim//\"/}"; hd_delim="${hd_delim//\\/}"
-    hd_line=0; hd_op_text=""; i=0
-    while IFS= read -r l; do
-      i=$((i + 1))
-      case "$l" in *"${hd_ops[0]}"*) hd_line=$i; hd_op_text="$l"; break ;; esac
-    done <<<"$cmd"
-    if [ "$hd_line" -gt 0 ] && [ -n "$hd_delim" ] \
-       && { [ "$hd_q" = "'" ] || [ "$hd_q" = '"' ] || [ "$hd_q" = '\' ]; } \
-       && grep -qE '(^|[[:space:]])(-F|--file|--body-file|--input)([[:space:]]+|=)-([[:space:]]|$)' <<<"$hd_op_text"; then
-      # Blank body lines only — never the operator line (an assignment sharing
-      # that line is still scanned). Ends at the delimiter; whitespace-tolerant,
-      # which can only end the region EARLY -> more scanning, never less.
-      d0_text="$(awk -v start="$hd_line" -v d="$hd_delim" '
-        NR <= start { print; next }
-        ended       { print; next }
-        { t = $0; sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
-          if (t == d) { ended = 1; print; next }
-          print "" }' <<<"$cmd")"
-    fi
-  fi
-  # (b) inert message-flag values -> blanked. Newlines collapse to spaces first
-  # so a multi-line quoted value is one region for the (quote-bounded, so never
-  # over-reaching) match; `\n` and ` ` are both non-identifier chars, so they are
-  # the same boundary class to D0's anchor below and collapsing can only expose a
-  # marker, never hide one.
-  d0_flags='((^|[[:space:]])((-m|-b|--message|--body|--subject|--title|--notes|--description)([[:space:]]+|=)|(-f|-F|--field|--raw-field)[[:space:]]+(body|title|message)=))'
-  d0_text="$(tr '\n' ' ' <<<"$d0_text")"
-  d0_text="$(sed -E "s/$d0_flags'[^']*'/\1''/g" <<<"$d0_text")"
-  # shellcheck disable=SC2016 # the $ and ` are literal EXCLUSIONS in the bracket, not expansions
-  d0_text="$(sed -E 's/'"$d0_flags"'"[^"$`]*"/\1""/g' <<<"$d0_text")"
-fi
 #
 # The leading boundary is `[^A-Za-z0-9_]`, NOT `[[:space:]]` (SAD-552, found by
 # this change's own adversarial pass): the old anchor missed an assignment
 # sitting immediately after a QUOTE, so `bash -c 'LAND_PR_TEST=1 land-pr.sh 5'`,
 # `eval "LAND_PR_TEST=1 …"` and `printf 'LAND_PR_TEST=1 …' > run.sh` all walked
 # straight through. Any non-identifier char now opens the match (a preceding
-# identifier char still does not, so MY_LAND_PR_TEST= stays unmatched). This is
-# a TIGHTENING shipped alongside the carve-out above — D0 gets broader in
-# command contexts and narrower only inside a git/gh message body.
+# identifier char still does not, so MY_LAND_PR_TEST= stays unmatched).
+# ⚠ Known cost, accepted deliberately: this also blocks a Bash command that
+# SEARCHES for a marker (`grep -rn 'LAND_PR_TEST=1' tools/dev/`), which the old
+# anchor let through. Closing a live bypass is worth a false positive that has a
+# zero-risk sanctioned path (the Grep/Edit tools), and the block message below
+# names that path so nobody is tempted to reword.
 #
 # The widened boundary covers every runtime-vanishing glue whose leftover char is
 # a non-identifier (`${IFS}X=1` leaves `}`, `$@X=1` leaves `@`) but NOT the bare
 # positional `$1`-`$9`, whose leftover char is a DIGIT — so `$9SEAM=1 land-pr.sh`
 # expanded to a live assignment and D0 never saw it. D0 therefore gets the same
-# SAD-258/357 normalization the D/F rules use, applied AFTER the masking above so
-# it can never resurrect a blanked message region. It only ever INSERTS
-# boundaries: it can expose a hidden marker, never hide one.
+# SAD-258/357 normalization the D/F rules use. It only ever INSERTS boundaries:
+# it can expose a hidden marker, never hide one.
 d0_text="$(sed -E 's/\$\{IFS[^}]*\}/ /g; s/\$IFS([^A-Za-z0-9_]|$)/ \1/g; s/\$\{[1-9@*]\}/ /g; s/\$[1-9@*]/ /g' <<<"$d0_text")"
 mapfile -t d0_segments < <(sed -E 's/&&|\|\||;|\||&/\n/g' <<<"$d0_text")
 for seg in "${d0_segments[@]}"; do
   if grep -qE '(^|[^A-Za-z0-9_])(SKIP_BASH_SAFETY|ALLOW_DESTRUCTIVE|ALLOW_MAIN_PUSH|ALLOW_DISABLED_STATION|ADB_NO_SERIAL_OK|LAND_PR_CFG_OVERRIDE|LAND_PR_SELFTEST|LAND_PR_SADTEST|LAND_PR_TEST)=' <<<"$seg"; then
-    block D0 "inline escape-hatch / test-seam assignment — these are Jason-only AMBIENT env (set in the shell that launched Claude), never in a command. (Documenting one in a git/gh message is fine: put the prose in a quoted-delimiter heredoc — <<'MSG' — or a single-quoted -m/--body value.)"
+    block D0 "inline escape-hatch / test-seam assignment — these are Jason-only AMBIENT env (set in the shell that launched Claude), never in a command. If you were only NAMING one, not setting it: put the prose in a file with Write/Edit and pass a PATH (git commit -F <file>), or search with the Grep tool instead of a Bash grep. Do NOT reword around this rule — if neither path fits, say so and file it."
   fi
 done
 
@@ -404,43 +375,69 @@ for seg in "${segments[@]}"; do
   # SAD-552 — READING core.hooksPath is not WRITING it. The old rule exempted
   # only `--get`, so the doctor's other read forms (bare `git config <name>`,
   # `--get-all`, `--get-regexp`, the modern `git config get <name>`) blocked a
-  # query that changes nothing. Only a WRITE can point hooks away from
-  # .githooks, and a write is exactly one of:
-  #   • an explicit write flag  — --add --replace-all --unset --unset-all
-  #                               --edit/-e --rename-section --remove-section
-  #   • a modern write subcmd   — config set|unset|unset-all|edit|
-  #                               rename-section|remove-section
-  #   • the deprecated form WITH a value — `git config <name> <value>`, i.e.
-  #     TWO positionals after `config`; ONE positional is a read.
-  # The positional walk skips the value of each value-taking location/type flag;
-  # a flag missing from that list can only INFLATE the count -> over-block.
-  # Ambiguity therefore always resolves toward blocking, never toward allowing.
+  # query that changes nothing.
+  #
+  # The classifier is AFFIRMATIVE-READ / FAIL-CLOSED, not enumerate-the-writes.
+  # The first cut enumerated write flags exactly and Barb + Watson both broke it
+  # the same way: git's parse-options accepts any UNAMBIGUOUS PREFIX, so
+  # `git config --unset-a core.hooksPath` matched no write spelling, fell through
+  # as a generic `-*` token, counted one positional and was classified a READ —
+  # while git happily removed the key and with it `.githooks/pre-push`. An
+  # enumeration of writes fails open on every spelling you did not think of; an
+  # enumeration of READS fails closed. So: a command is a read ONLY if every
+  # long option it carries is a known read/neutral option AND it is either a
+  # modern read subcommand or a single-positional query. Everything else —
+  # including any option this list does not recognize, abbreviation or not — is
+  # treated as a write and blocked.
   if $is_git && $in_project \
      && grep -qE '(^|[[:space:]])config([[:space:]]|$)' <<<"$mseg" \
      && grep -qiE 'core\.hooksPath' <<<"$mseg"; then
     cfg_write=false
-    grep -qE '(^|[[:space:]])(--add|--replace-all|--unset|--unset-all|--edit|-e|--rename-section|--remove-section)([[:space:]]|=|$)' <<<"$mseg" && cfg_write=true
-    grep -qE '(^|[[:space:]])config[[:space:]]+(set|unset|unset-all|edit|rename-section|remove-section)([[:space:]]|$)' <<<"$mseg" && cfg_write=true
+    after_cfg=false; expect_val=false; positionals=0
+    cfg_pos=()
+    # shellcheck disable=SC2086 # word-splitting the match-copy into tokens is the point (set -f is on)
+    for tok in $mseg; do
+      if ! $after_cfg; then [ "$tok" = "config" ] && after_cfg=true; continue; fi
+      if $expect_val; then expect_val=false; continue; fi
+      case "$tok" in
+        # Value-taking neutral options: skip the option AND its value token.
+        -f|--file|--blob|-t|--type|--default|--comment) expect_val=true; continue ;;
+        # Neutral / read-only options that decide nothing on their own.
+        --get|--get-all|--get-regexp|--get-urlmatch|--list|-l|--global|--system|--local|--worktree|\
+        --null|-z|--name-only|--show-origin|--show-scope|--show-names|--includes|--no-includes|\
+        --type=*|--file=*|--blob=*|--default=*|--comment=*|--fixed-value|--all|--regexp|--value=*|--url=*)
+          continue ;;
+        # ANY other option — including a prefix abbreviation of a write flag
+        # (--unse, --unset-a, --rem…) — is a write. Fail closed.
+        -*) cfg_write=true; continue ;;
+      esac
+      positionals=$((positionals + 1))
+      cfg_pos+=("$tok")
+    done
     if ! $cfg_write; then
-      after_cfg=false; expect_val=false; positionals=0; first_pos=""
-      # shellcheck disable=SC2086 # word-splitting the match-copy into tokens is the point (set -f is on)
-      for tok in $mseg; do
-        if ! $after_cfg; then [ "$tok" = "config" ] && after_cfg=true; continue; fi
-        if $expect_val; then expect_val=false; continue; fi
-        case "$tok" in
-          -f|--file|--blob|-t|--type|--default|--comment) expect_val=true; continue ;;
-          -*) continue ;;
-        esac
-        positionals=$((positionals + 1))
-        [ -z "$first_pos" ] && first_pos="$tok"
-      done
-      case "$first_pos" in
-        get|get-all|get-regexp|get-urlmatch|list) ;;   # modern read subcommand
+      case "${cfg_pos[0]:-}" in
+        # Modern read subcommands take a name and change nothing.
+        get|get-all|get-regexp|get-urlmatch|list) ;;
+        # Modern write subcommands.
+        set|unset|unset-all|edit|rename-section|remove-section|add|replace-all) cfg_write=true ;;
+        # Deprecated form: `git config <name>` is a read, `<name> <value>` a write.
         *) [ "$positionals" -ge 2 ] && cfg_write=true ;;
       esac
     fi
-    if $cfg_write && ! grep -qiE 'core\.hooksPath([[:space:]]+|=)\.githooks([[:space:]]|$)' <<<"$mseg"; then
-      block F6 "pointing core.hooksPath away from .githooks — evasion signal"
+    if $cfg_write; then
+      # The .githooks exemption is bound to the VALUE ACTUALLY BEING SET, not to
+      # the text appearing anywhere in the segment (Barb: the old free-text grep
+      # was satisfied by a trailing shell comment, or by --comment's own value,
+      # while a different path was written). Handles both `config <name> <value>`
+      # and the modern `config set <name> <value>`.
+      cfg_name="${cfg_pos[0]:-}"; cfg_val="${cfg_pos[1]:-}"
+      case "$cfg_name" in
+        set|add|replace-all) cfg_name="${cfg_pos[1]:-}"; cfg_val="${cfg_pos[2]:-}" ;;
+      esac
+      if [ "$(printf '%s' "$cfg_name" | tr '[:upper:]' '[:lower:]')" != "core.hookspath" ] \
+         || [ "$cfg_val" != ".githooks" ]; then
+        block F6 "pointing core.hooksPath away from .githooks — evasion signal"
+      fi
     fi
   fi
 

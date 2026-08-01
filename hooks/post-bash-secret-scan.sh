@@ -18,16 +18,22 @@
 #                     ("BEGIN … PRIVATE KEY", "private_key"). A marker is
 #                     evidence only when it appears attached to the real
 #                     artifact, so each marker is anchored to the shape of that
-#                     artifact (the PEM's ----- armour; the JSON key's colon and
-#                     value) — and it is not scanned inside the SEARCH-PATTERN
-#                     operand of the command's own grep/rg, because a hook that
+#                     artifact (the PEM's hyphen armour; the JSON key's colon and
+#                     value) — and it is not scanned inside a quoted operand of
+#                     the command's own grep/rg SEGMENT, because a hook that
 #                     fires on the phrase you searched for is reporting itself.
-#                     A real key pasted into a grep pattern is still caught: the
-#                     VALUE patterns scan that operand unmasked.
+#
+# ⚠ The masking is only safe because of `private-key-material` below. Marker
+# masking is coarse — it blanks EVERY quoted operand of a search-tool segment,
+# not just the pattern — so on its own it would launder a real key behind
+# `grep -q zzz '<key>'`. The VALUE class is never masked, and it now includes
+# armour-plus-body, so key MATERIAL is caught wherever it sits while the bare
+# marker (a phrase, a regex definition, prose) is not. Do not remove that
+# pattern while the masking is in place; they are one mechanism.
 #
 # Both changes narrow what MATCHES; neither narrows what is LOOKED AT for real
 # key material. See docs/decisions/ and SAD-552 for the false-positive tally
-# that motivated it (6 observed, 0 credentials).
+# that motivated it (9 observed, 0 credentials).
 
 set -u
 
@@ -82,13 +88,30 @@ scan "openai-key"          '(^|[^A-Za-z0-9-])sk-(proj-)?[A-Za-z0-9_-]{20,}'
 scan "stripe-key"          '[sr]k_live_[A-Za-z0-9]{16,}'
 scan "resend-key"          '(^|[^A-Za-z0-9_])re_[A-Za-z0-9_]{16,}'
 
+# VALUE class — armour PLUS an actual key body on the same line. This is the
+# single-line form a PEM takes when it is pasted into a command or embedded in
+# JSON (where "\n" has already been stripped to "n" above). It exists because
+# the first cut of SAD-552 CLAIMED the generic ≥12-char pattern was the backstop
+# for a masked PEM and that was simply FALSE — `private[_-]?key` cannot match
+# "PRIVATE KEY" (space, not underscore) and the longest run of allowed chars at
+# the head of a PEM is "-----BEGIN", ten characters, under the twelve-char floor.
+# Barb and Watson each proved a full private key transiting a grep operand with
+# no tripwire. Armour + ≥100 chars of body is key MATERIAL and is never masked;
+# armour ALONE is a marker (below) and may be. That split is the whole design.
+scan "private-key-material" '[-]{4,}[[:space:]]?BEGIN [A-Z0-9 ]*PRIVATE KEY[-]{4,}[[:space:]nA-Za-z0-9+/=]{100,}'
+
 # MARKER class. Each is anchored to the real artifact, not to its name:
-#   private-key-block   — RFC 7468 armour is exactly five hyphens; prose and
-#                         regex definitions ("BEGIN [A-Z ]*PRIVATE KEY") have none.
+#   private-key-block   — RFC 7468 armour is a hyphen RUN; prose and regex
+#                         definitions ("BEGIN [A-Z ]*PRIVATE KEY") have none.
+#                         {4,} not {5}: Watson found that the exact-five form
+#                         narrowed detection past the old pattern, dropping
+#                         "---- BEGIN ENCRYPTED PRIVATE KEY ----" which used to
+#                         trip. [A-Z0-9 ] also picks up SSH2-style labels with a
+#                         digit, which NEITHER version matched.
 #   gcp-service-account — a service-account JSON is "private_key": "<~1700 chars>";
 #                         the bare token "private_key" is a field NAME, not a value.
 # What this lets through: text naming a private key without carrying one.
-scan_marker "private-key-block"   '[-]{5}BEGIN [A-Z ]*PRIVATE KEY'
+scan_marker "private-key-block"   '[-]{4,}[[:space:]]?BEGIN [A-Z0-9 ]*PRIVATE KEY'
 scan_marker "gcp-service-account" '"private_key"[[:space:]]*:[[:space:]]*"[^"]{20,}'
 
 # Generic credential assignment (folded from Jason's local hook, widened per Watson
