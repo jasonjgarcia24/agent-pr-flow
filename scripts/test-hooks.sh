@@ -11,7 +11,7 @@ set -u
 
 ROOT="$(git rev-parse --show-toplevel)" || exit 1
 H="$ROOT/.claude/hooks"
-pass=0; fail=0
+pass=0; fail=0; skip=0
 
 mk() { # $1 = command, $2 = cwd (default repo root)
   jq -n --arg c "$1" --arg d "${2:-$ROOT}" '{tool_input:{command:$c}, cwd:$d}'
@@ -53,11 +53,29 @@ t_delta() { # $1=name $2=baseline-rc $3=head-rc $4=command [$5=cwd]
   # happens. A differential row is a PRE-MERGE review aid by construction; the
   # landed behaviour it describes is pinned separately by absolute `t` rows,
   # which keep asserting after the change lands (SAD-635).
+  #
+  # WHY THE SKIP IS SAFE, not merely convenient (SAD-635): it keys on the hook
+  # FILE, not on a date or a flag. Any regression to pre-bash-safety.sh makes
+  # base != head again and re-arms all 22 rows automatically — so a skip can
+  # never hide a change to the very thing these rows guard.
+  #
+  # LANDMINE, and the reason the skip DEFERS the rot rather than ending it: the
+  # rows' want_base values are pinned to the pre-SAD-552 baseline, which is no
+  # longer the merge-base for any future branch. The next change to
+  # pre-bash-safety.sh lifts the skip and re-arms them against a baseline they
+  # were never written for — 12 of the 22 go red immediately (4 want base=2 and
+  # get 0; 8 want base=0 and get 2), failures unrelated to that change's own
+  # diff. Whoever lands that change must RE-AUTHOR OR DELETE these rows; do not
+  # re-pin want_base and leave the same trap armed for the next person.
+  # Retirement is tracked in SAD-638.
   local name="$1" want_base="$2" want_head="$3" cmd="$4" cwd="${5:-$ROOT}"
   local base_hook rc_b rc_h
   base_hook="$BASELINE_HOOK"
   if [ -z "$base_hook" ] || [ ! -s "$base_hook" ]; then
-    echo "SKIP  $name ($BASELINE_SKIP_WHY)"; return
+    # Counted, not just printed: a skipped row is not a passing row, and the
+    # RESULT line is the only part of ~300 lines of output anyone reads
+    # (SAD-635). An unrun suite must not look like a passing suite.
+    echo "SKIP  $name ($BASELINE_SKIP_WHY)"; skip=$((skip+1)); return
   fi
   mk "$cmd" "$cwd" | env CLAUDE_PROJECT_DIR="$ROOT" bash "$base_hook" >/dev/null 2>&1; rc_b=$?
   mk "$cmd" "$cwd" | env CLAUDE_PROJECT_DIR="$ROOT" bash "$H/pre-bash-safety.sh" >/dev/null 2>&1; rc_h=$?
@@ -83,6 +101,7 @@ _base_ref="$(git merge-base HEAD origin/main 2>/dev/null || git rev-parse origin
 if [ -n "$_base_ref" ] && git show "$_base_ref:.claude/hooks/pre-bash-safety.sh" > "$_bl" 2>/dev/null && [ -s "$_bl" ]; then
   if cmp -s "$_bl" "$H/pre-bash-safety.sh"; then
     BASELINE_SKIP_WHY="baseline is identical to head — the change under test has landed"
+    rm -f "$_bl"   # provably unused on this branch; nothing else reaps it
   else
     BASELINE_HOOK="$_bl"
   fi
@@ -552,5 +571,5 @@ out=$(jq -n '{tool_input:{file_path:"/tmp/x.kt"}}' | env CLAUDE_PROJECT_DIR="$RO
 if [ "$rc" = "0" ]; then echo "PASS  no config -> fast no-op"; pass=$((pass+1)); else echo "FAIL  no-config (rc=$rc) :: $out"; fail=$((fail+1)); fi
 
 echo ""
-echo "RESULT: $pass passed, $fail failed"
+echo "RESULT: $pass passed, $fail failed, $skip skipped"
 [ "$fail" = "0" ]
