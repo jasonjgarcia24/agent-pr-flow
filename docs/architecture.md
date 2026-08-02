@@ -37,9 +37,12 @@ tool:
 
   It **fails closed** without `jq`, and every rule matches a normalized copy so quoting or prefixing
   can't slip a command past it.
-- **`post-bash-secret-scan.sh`** — a `PostToolUse` advisory tripwire that scans command output for
-  secret-shaped strings (cloud keys, tokens, private-key blocks) and warns without ever printing the
-  matched value.
+- **`post-bash-secret-scan.sh`** — a `PostToolUse` advisory tripwire that scans the command and its
+  output for secret-shaped strings (cloud keys, tokens, private-key blocks) and warns without ever
+  printing the matched value. Patterns split into two classes: **value** patterns (high-entropy key
+  material) scan everything, while **marker** patterns (zero-entropy structure like `"private_key"`)
+  are anchored to the real artifact and skip the command's own grep operand — a scanner that fires
+  on the phrase you searched for is reporting itself, not a leak.
 - **`lint-on-edit.sh`** — a `PostToolUse[Edit|Write]` hook that runs a configured lint command on
   each edited file; a `null` config value makes it a fast no-op.
 
@@ -153,3 +156,13 @@ environment, so an inline `VAR=1 command` never reaches them *and* is blocked ou
 merge) and F5 (trunk deletion) have **no** hatch. Agents never set these; when a legitimate command
 trips a guard, the remedy is to author the content with editor tools instead of a shell heredoc, not
 to flip a hatch.
+
+**D0 has no "it's only prose" carve-out, and must not grow one.** SAD-552 tried: a commit message
+that *documents* a hatch is stored, never parsed, so blanking a quoted-delimiter heredoc body or an
+inert quoted `-m` value before matching looked provably safe. Two independent reviewers broke it
+with working exploits — a heredoc co-located with `git` but *owned* by `bash`, and a decoy `-m`
+inside a quoted string that skews the masker's quote pairing away from bash's. Both reduce to the
+same thing: **a regex cannot decide which program owns a token.** The masking was reverted; do not
+reintroduce it without a real shell tokenizer, and if you build one it belongs to D0, F1 and F6
+together. The remedy for the false positive needs no hook change: author the text with Write/Edit
+and pass a path (`git commit -F <file>`), and search with the Grep tool rather than a Bash `grep`.
