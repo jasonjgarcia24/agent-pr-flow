@@ -360,6 +360,12 @@ t_delta "delta: hooksPath set stays blocked"               2 2 'git config core.
 t_delta "delta: hooksPath empty-value set stays blocked"   2 2 "git config core.hooksPath ''"
 t_delta "delta: --unset stays blocked"                     2 2 'git config --unset core.hooksPath'
 t_delta "delta: .githooks doctor set stays allowed"        0 0 'git config core.hooksPath .githooks'
+# Round-5 findings — the payloads that discriminate. All were ALLOWED by main.
+t_delta "delta: option-as-value stays blocked"             2 2 'git config core.hooksPath --local'
+t_delta "delta: whitespace-only value stays blocked"       2 2 "git config core.hooksPath ' '"
+t_delta "delta: --unset-all + .githooks now blocked"       0 2 'git config --unset-all core.hooksPath .githooks'
+t_delta "delta: .githooks trailing-comment decoy blocked"  0 2 'git config core.hooksPath /tmp/evilhooks # core.hooksPath .githooks'
+t_delta "delta: --path --get read stays allowed"           0 0 'git config --path --get core.hooksPath'
 t_delta "delta: prose-in-heredoc stays blocked"            2 2 "$hd_prose"
 t_delta "delta: -F <path> stays allowed"                   0 0 'git commit -F /tmp/msg.txt'
 
@@ -395,6 +401,33 @@ t 'F6 ADV: unknown long option is a write'       2 'git config --xyzzy core.hook
 t 'F6 ADV: .githooks in a trailing comment does not exempt' 2 'git config core.hooksPath /tmp/evilhooks # core.hooksPath .githooks'
 t 'F6 ADV: .githooks as --comment value does not exempt'    2 "git config --comment 'core.hooksPath .githooks' core.hooksPath /tmp/evilhooks"
 t 'F6 modern set to .githooks still allowed'     0 'git config set core.hooksPath .githooks'
+# Barb HIGH-A: git has already consumed the NAME, so the next token is the VALUE
+# however option-shaped it looks. A shape-based walk called these live writes
+# "reads" — the exact-form matcher cannot, because the name must be LAST.
+t 'F6 ADV: --local as the VALUE blocked'        2 'git config core.hooksPath --local' '' "$ROOT" F6
+t 'F6 ADV: -z as the VALUE blocked'             2 'git config core.hooksPath -z'      '' "$ROOT" F6
+t 'F6 ADV: --all as the VALUE blocked'          2 'git config core.hooksPath --all'   '' "$ROOT" F6
+t 'F6 ADV: --fixed-value as the VALUE blocked'  2 'git config core.hooksPath --fixed-value' '' "$ROOT" F6
+t 'F6 ADV: scope flag then option-as-value blocked' 2 'git config --global core.hooksPath --local' '' "$ROOT" F6
+# Barb HIGH-B: the dequote DELETES quote chars, so a blank or quote-only value
+# vanished and deflated the count. Quoted regions now collapse to one token.
+t 'F6 ADV: empty value blocked'                 2 "git config core.hooksPath ''"   '' "$ROOT" F6
+t 'F6 ADV: whitespace-only value blocked'       2 "git config core.hooksPath ' '"  '' "$ROOT" F6
+t 'F6 ADV: multi-space value blocked'           2 "git config core.hooksPath '  '" '' "$ROOT" F6
+t 'F6 ADV: quote-only value blocked'            2 "git config core.hooksPath \"''\"" '' "$ROOT" F6
+t 'F6 ADV: single-quote value blocked'          2 "git config core.hooksPath \"'\""  '' "$ROOT" F6
+# Watson C1: for the unset family a trailing positional is a VALUE-PATTERN, not
+# the value being set, so no exemption may be derived from its position.
+t 'F6 ADV: --unset-all + .githooks pattern blocked' 2 'git config --unset-all core.hooksPath .githooks' '' "$ROOT" F6
+t 'F6 ADV: --unset + .githooks pattern blocked'     2 'git config --unset core.hooksPath .githooks'     '' "$ROOT" F6
+t 'F6 ADV: --unset-a abbrev + .githooks blocked'    2 'git config --unset-a core.hooksPath .githooks'   '' "$ROOT" F6
+t 'F6 ADV: --replace-all + empty + .githooks blocked' 2 "git config --replace-all core.hooksPath '' .githooks" '' "$ROOT" F6
+t 'F6 ADV: -f file --unset-all + .githooks blocked' 2 'git config -f .git/config --unset-all core.hooksPath .githooks' '' "$ROOT" F6
+t 'F6 ADV: empty value + .githooks decoy blocked'   2 "git config core.hooksPath '' .githooks" '' "$ROOT" F6
+# Reads the exact-form matcher must keep allowing.
+t 'F6 --path --get read allowed'   0 'git config --path --get core.hooksPath'
+t 'F6 --local bare read allowed'   0 'git config --local core.hooksPath'
+t 'F6 quoted-name read allowed'    0 "git config --get 'core.hooksPath'"
 t 'F6 read with a scope flag allowed'            0 'git config --global --get core.hooksPath'
 
 echo "== jq fail-closed =="
@@ -431,11 +464,22 @@ SA_JSON='  "private_key": "-----BEGIN PRIVATE KEY-----xxxxxxxxxxxxxxxxxxxxxxxxxx
 # -- the observed false positives (SAD-552): a marker in the command's own
 #    search-pattern operand, and a marker in a pattern DEFINITION that was read.
 p "FP: grep for the PEM header PHRASE (no armour)" 0 "grep -rn 'BEGIN PRIVATE KEY' ." ''
-p "FP: grep for the full PEM armour (operand masked)" 0 "grep -rn -- '$PEM_HDR' /home/x/.ssh" ''
+# ACCEPTED RESIDUAL (SAD-552): grepping for the FULL armour string still trips.
+# The operand masking that made it clean was removed — Barb showed a `|` inside
+# a quoted string manufactures a fake grep segment, so `echo "x | grep '<key>'"
+# >> notes.md` wrote a real key to disk and was masked. Same root cause as the
+# reverted D0 carve-out. The remedy is the Grep tool, not a masked scanner.
+p "ACCEPTED: full armour in a grep operand still trips" 2 "grep -rn -- '$PEM_HDR' /home/x/.ssh" ''
+p "Barb: key laundered past a fake grep segment still trips" 2 "echo \"x | grep '$PEM_HDR'\" >> notes.md" ''
+p "Barb: key written by echo still trips"          2 "echo '$PEM_HDR' >> notes.md" ''
 p "FP: grep for the JSON key NAME"    0 'grep -rni "\"private_key\"" .claude/hooks' ''
 p "FP: hook pattern definitions in the output" 0 'cat .claude/hooks/post-bash-secret-scan.sh' \
   'scan_marker "gcp-service-account" '"'"'"private_key"[[:space:]]*:[[:space:]]*"[^"]{20,}'"'"''
 p "FP: prose naming a private key"    0 'cat docs/setup.md' 'Download the JSON; it carries a private_key field.'
+# The MARKER now requires the CLOSING armour too — that, not masking, is what
+# keeps a search for the header PHRASE clean while a real block still trips.
+p "FP: opening armour only, no closing"  0 'cat notes.md' 'the block starts -----BEGIN RSA PRIVATE KEY'
+p "ADV: full armour pair tripped"        2 'cat notes.md' 'x -----BEGIN RSA PRIVATE KEY----- y'
 p "FP: empty JSON key in a schema"    0 'cat schema.json' '{"private_key": ""}'
 # -- adversarial: real key material must still trip --
 p "ADV: PEM armour in output still tripped" 2 'cat id_rsa' "$PEM_HDR"
@@ -457,7 +501,6 @@ p "ADV: full PEM in a grep operand tripped (VALUE class)" 2 "grep -rn -- '$PEM_H
 p "ADV: full PEM laundered behind a decoy pattern tripped" 2 "grep -q zzz '$PEM_HDR$PEM_BODY'" ''
 p "ADV: rg operand with a full PEM tripped"               2 "rg -e '$PEM_HDR$PEM_BODY' ." ''
 p "ADV: service-account JSON in a grep operand tripped"   2 "grep -rn '{\"private_key\":\"$PEM_HDR$PEM_BODY\"}' ." ''
-p "FP: armour with NO body in a grep operand stays clean" 0 "grep -rn -- '$PEM_HDR' /home/x/.ssh" ''
 # Watson I4: pinning exactly five hyphens narrowed detection past the OLD
 # pattern. RFC 7468 armour is a hyphen run; these used to trip and must again.
 p "ADV: four-hyphen armour tripped"       2 'cat k.pem' '---- BEGIN ENCRYPTED PRIVATE KEY ----'

@@ -49,31 +49,11 @@ text="$(printf '%s\n%s' "$command_text" "$response_text" | head -c 200000)"
 # (\"api_key\": \"...\") — strip the backslashes so quoted values still match.
 text="${text//\\/}"
 
-# Marker-scan text: same thing, but with the quoted operands of the command's
-# own search tools blanked. Split on the shell's segment separators so ONLY a
-# search-tool segment is masked (`grep 'x' f && echo '-----BEGIN…' > k.pem`
-# keeps its second segment intact), and mask nothing at all in the OUTPUT.
-masked_cmd=""
-while IFS= read -r s; do
-  if grep -qE '^([^[:space:]]*/)?(grep|egrep|fgrep|rg|ripgrep|ag|ack|pcregrep|ugrep)([[:space:]]|$)' \
-       <<<"$(sed -E 's/^[[:space:](]+//' <<<"$s")"; then
-    s="$(sed -E "s/'[^']*'/''/g; s/\"[^\"]*\"/\"\"/g" <<<"$s")"
-  fi
-  masked_cmd="${masked_cmd}${s}"$'\n'
-done < <(sed -E 's/&&|\|\||;|\||&/\n/g' <<<"$command_text")
-marker_text="$(printf '%s\n%s' "$masked_cmd" "$response_text" | head -c 200000)"
-marker_text="${marker_text//\\/}"
-
 hits=""
 # `--` guards a pattern that legitimately starts with `-` (the PEM armour below)
 # from being parsed as a grep option.
 scan() { # $1 = pattern name, $2 = ERE — VALUE class, scans everything
   if grep -qE -- "$2" <<<"$text"; then
-    hits="${hits}${hits:+, }$1"
-  fi
-}
-scan_marker() { # $1 = pattern name, $2 = ERE — MARKER class, search operands masked
-  if grep -qE -- "$2" <<<"$marker_text"; then
     hits="${hits}${hits:+, }$1"
   fi
 }
@@ -122,14 +102,15 @@ scan "private-key-material" '[-]{4,}[[:space:]]?BEGIN [A-Z0-9 ]*PRIVATE KEY[-]{4
 #   gcp-service-account — a service-account JSON is "private_key": "<~1700 chars>";
 #                         the bare token "private_key" is a field NAME, not a value.
 # What this lets through: text naming a private key without carrying one.
-scan_marker "private-key-block"   '[-]{4,}[[:space:]]?BEGIN [A-Z0-9 ]*PRIVATE KEY'
-scan_marker "gcp-service-account" '"private_key"[[:space:]]*:[[:space:]]*"[^"]{20,}'
+scan        "private-key-block"   '[-]{4,}[[:space:]]?BEGIN [A-Z0-9 ]*PRIVATE KEY[[:space:]]?[-]{4,}'
+scan        "gcp-service-account" '"private_key"[[:space:]]*:[[:space:]]*"[^"]{20,}'
 
 # Generic credential assignment (folded from Jason's local hook, widened per Watson
 # review): secret-suggesting key = / : value, optionally quoted (covers JSON), plus
 # HTTP "Bearer <token>" as its own alternative. Case-insensitive. VALUE class — the
-# ≥12-char value requirement is what makes it a value pattern, and it is the
-# backstop that still catches a real private key pasted into a grep operand.
+# ≥12-char value requirement is what makes it a value pattern. It covers credential
+# ASSIGNMENTS only; the backstop for a PEM is `private-key-material` above, NOT this
+# (this pattern cannot match "PRIVATE KEY" at all — space, not underscore).
 generic_pat="(^|[^A-Za-z])(api[_-]?key|access[_-]?token|client[_-]?secret|private[_-]?key|pass(word|wd)?|secret)[\"']?[[:space:]]*[=:][[:space:]]*[\"']?[A-Za-z0-9+/._-]{12,}|(^|[^A-Za-z])bearer[[:space:]]+[A-Za-z0-9+/._=-]{12,}"
 if grep -qiE "$generic_pat" <<<"$text"; then
   hits="${hits}${hits:+, }generic-credential-assignment"

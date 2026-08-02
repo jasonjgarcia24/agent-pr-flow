@@ -373,81 +373,78 @@ for seg in "${segments[@]}"; do
   if $is_git && $in_project && grep -qiE 'core\.hooksPath=' <<<"$mseg"; then
     block F6 "inline core.hooksPath override — evasion signal"
   fi
-  # SAD-552 — READING core.hooksPath is not WRITING it. The old rule exempted
-  # only `--get`, so the doctor's other read forms (bare `git config <name>`,
-  # `--get-all`, `--get-regexp`, the modern `git config get <name>`) blocked a
-  # query that changes nothing.
-  #
-  # The classifier is AFFIRMATIVE-READ / FAIL-CLOSED, not enumerate-the-writes.
-  # The first cut enumerated write flags exactly and Barb + Watson both broke it
-  # the same way: git's parse-options accepts any UNAMBIGUOUS PREFIX, so
-  # `git config --unset-a core.hooksPath` matched no write spelling, fell through
-  # as a generic `-*` token, counted one positional and was classified a READ —
-  # while git happily removed the key and with it `.githooks/pre-push`. An
-  # enumeration of writes fails open on every spelling you did not think of; an
-  # enumeration of READS fails closed. So: a command is a read ONLY if every
-  # long option it carries is a known read/neutral option AND it is either a
-  # modern read subcommand or a single-positional query. Everything else —
-  # including any option this list does not recognize, abbreviation or not — is
-  # treated as a write and blocked.
+  # SAD-552 — READING core.hooksPath is not WRITING it. Deciding which by
+  # INSPECTING OPTIONS was tried twice and broke twice (Watson + Barb):
+  #   • `git config core.hooksPath --local` — git has already consumed the name,
+  #     so the NEXT token is the VALUE however option-shaped it looks. A
+  #     shape-based walk counted it as an option, saw one positional, and called
+  #     a live write a query. Verified end-to-end: the key becomes `--local` and
+  #     .githooks/pre-push stops running. Same for -z, -l, --all, --fixed-value…
+  #   • `git config core.hooksPath ' '` — $mseg DELETES quote characters rather
+  #     than parsing them, so a whitespace-only or quote-only value vanishes and
+  #     deflates the count the same way. ('' was patched; ' ', "'", "''" were not.)
+  # Both are the D0 lesson again: A REGEX CANNOT DECIDE WHICH PROGRAM OWNS A
+  # TOKEN. So F6 stops classifying and matches WHOLE COMMAND FORMS: an exact
+  # allowlist of the read spellings plus the one sanctioned write. Anything else
+  # BLOCKS. There is no option list to keep in sync with git's grammar, no
+  # positional inference, and an unmodelled form fails closed by construction.
+  # This is strictly narrower than the pre-SAD-552 rule (which exempted `--get`
+  # anywhere and any `.githooks` text anywhere) — it only ADDS the read forms
+  # that rule blocked by accident.
   if $is_git && $in_project \
      && grep -qE '(^|[[:space:]])config([[:space:]]|$)' <<<"$mseg" \
      && grep -qiE 'core\.hooksPath' <<<"$mseg"; then
-    cfg_write=false
-    # The dequote that built $mseg erases an EMPTY quoted value ('' / ""), which
-    # would DEFLATE the positional count and read as a query -- but
-    # `git config core.hooksPath ''` genuinely WRITES an empty value, and git
-    # then behaves as if hooks were unset (verified: a refusing pre-commit stops
-    # running). Probe the RAW segment for it. This is the ONLY deflation the
-    # dequote can cause -- a non-empty quoted value survives as one or more
-    # tokens, which over-counts toward blocking.
-    grep -qE "core\.hooksPath['\"]?[[:space:]]+(''|\"\")+([[:space:]]|$)" <<<"$seg" && cfg_write=true
-    after_cfg=false; expect_val=false; positionals=0
-    cfg_pos=()
-    # shellcheck disable=SC2086 # word-splitting the match-copy into tokens is the point (set -f is on)
-    for tok in $mseg; do
-      if ! $after_cfg; then [ "$tok" = "config" ] && after_cfg=true; continue; fi
-      if $expect_val; then expect_val=false; continue; fi
-      case "$tok" in
-        # Value-taking neutral options: skip the option AND its value token.
-        -f|--file|--blob|-t|--type|--default|--comment) expect_val=true; continue ;;
-        # Neutral / read-only options that decide nothing on their own.
-        --get|--get-all|--get-regexp|--get-urlmatch|--list|-l|--global|--system|--local|--worktree|\
-        --null|-z|--name-only|--show-origin|--show-scope|--show-names|--includes|--no-includes|\
-        --type=*|--file=*|--blob=*|--default=*|--comment=*|--fixed-value|--all|--regexp|--value=*|--url=*)
-          continue ;;
-        # ANY other option — including a prefix abbreviation of a write flag
-        # (--unse, --unset-a, --rem…) — is a write. Fail closed.
-        -*) cfg_write=true; continue ;;
-      esac
-      positionals=$((positionals + 1))
-      cfg_pos+=("$tok")
+    # Token source is built from the RAW segment with each QUOTED REGION
+    # collapsed to exactly ONE token, so a value can never vanish: content
+    # without whitespace keeps its text (a quoted read still reads), anything
+    # else — empty, blank, or containing spaces — becomes an opaque placeholder
+    # that can equal neither the key name nor .githooks.
+    cfg_src="$(sed -E "s/'[[:space:]]*'/__QQ__/g; s/\"[[:space:]]*\"/__QQ__/g" <<<"$seg")"
+    cfg_src="$(sed -E "s/'([^'[:space:]]+)'/\1/g; s/\"([^\"[:space:]]+)\"/\1/g" <<<"$cfg_src")"
+    cfg_src="$(sed -E "s/'[^']*'/__QQ__/g; s/\"[^\"]*\"/__QQ__/g" <<<"$cfg_src")"
+
+    cfg_toks=(); cfg_after=false
+    # shellcheck disable=SC2086 # word-splitting into tokens is the point (set -f is on)
+    for tok in $cfg_src; do
+      if ! $cfg_after; then [ "$tok" = "config" ] && cfg_after=true; continue; fi
+      cfg_toks+=("$tok")
     done
-    if ! $cfg_write; then
-      case "${cfg_pos[0]:-}" in
-        # Modern read subcommands take a name and change nothing.
-        get|get-all|get-regexp|get-urlmatch|list) ;;
-        # Modern write subcommands.
-        set|unset|unset-all|edit|rename-section|remove-section|add|replace-all) cfg_write=true ;;
-        # Deprecated form: `git config <name>` is a read, `<name> <value>` a write.
-        *) [ "$positionals" -ge 2 ] && cfg_write=true ;;
+    # Leading modifier flags that cannot write on their own. A flag NOT listed
+    # here simply fails to match a form -> block; this list can only ever relax
+    # the READ side, never the write side, because every form below still has to
+    # match exactly and end at the key name.
+    cfg_i=0
+    while [ "$cfg_i" -lt "${#cfg_toks[@]}" ]; do
+      case "${cfg_toks[$cfg_i]}" in
+        --global|--system|--local|--worktree|--null|-z|--show-origin|--show-scope|\
+        --name-only|--includes|--no-includes|--path|--bool|--int|--bool-or-int|\
+        --expiry-date|--fixed-value) cfg_i=$((cfg_i + 1)) ;;
+        *) break ;;
       esac
+    done
+    cfg_rest=()
+    [ "$cfg_i" -lt "${#cfg_toks[@]}" ] && cfg_rest=("${cfg_toks[@]:$cfg_i}")
+    # Optional read verb.
+    case "${cfg_rest[0]:-}" in
+      --get|--get-all|--get-regexp|get)
+        if [ "${#cfg_rest[@]}" -gt 1 ]; then cfg_rest=("${cfg_rest[@]:1}"); else cfg_rest=(); fi ;;
+    esac
+    cfg_lc() { printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'; }
+    cfg_ok=false
+    # READ: the key name is the LAST token and nothing follows it.
+    if [ "${#cfg_rest[@]}" -eq 1 ] && [ "$(cfg_lc "${cfg_rest[0]}")" = "core.hookspath" ]; then
+      cfg_ok=true
     fi
-    if $cfg_write; then
-      # The .githooks exemption is bound to the VALUE ACTUALLY BEING SET, not to
-      # the text appearing anywhere in the segment (Barb: the old free-text grep
-      # was satisfied by a trailing shell comment, or by --comment's own value,
-      # while a different path was written). Handles both `config <name> <value>`
-      # and the modern `config set <name> <value>`.
-      cfg_name="${cfg_pos[0]:-}"; cfg_val="${cfg_pos[1]:-}"
-      case "$cfg_name" in
-        set|add|replace-all) cfg_name="${cfg_pos[1]:-}"; cfg_val="${cfg_pos[2]:-}" ;;
-      esac
-      if [ "$(printf '%s' "$cfg_name" | tr '[:upper:]' '[:lower:]')" != "core.hookspath" ] \
-         || [ "$cfg_val" != ".githooks" ]; then
-        block F6 "pointing core.hooksPath away from .githooks — evasion signal"
-      fi
+    # The ONE sanctioned write — the repo doctor pointing hooks AT .githooks.
+    if [ "${#cfg_rest[@]}" -eq 2 ] && [ "$(cfg_lc "${cfg_rest[0]}")" = "core.hookspath" ] \
+       && [ "${cfg_rest[1]}" = ".githooks" ]; then
+      cfg_ok=true
     fi
+    if [ "${#cfg_rest[@]}" -eq 3 ] && [ "${cfg_rest[0]}" = "set" ] \
+       && [ "$(cfg_lc "${cfg_rest[1]}")" = "core.hookspath" ] && [ "${cfg_rest[2]}" = ".githooks" ]; then
+      cfg_ok=true
+    fi
+    $cfg_ok || block F6 "core.hooksPath: only an exact read form or the doctor's own 'core.hooksPath .githooks' is allowed — anything else reads as pointing hooks away from .githooks"
   fi
 
   if $is_git && $in_project && grep -qE '(^|[[:space:]])push([[:space:]]|$)' <<<"$mseg"; then
