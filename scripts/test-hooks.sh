@@ -48,13 +48,16 @@ t_delta() { # $1=name $2=baseline-rc $3=head-rc $4=command [$5=cwd]
   # running one payload against the PRE-change hook and the HEAD hook and
   # diffing the verdicts — so an INTENDED change of verdict is asserted here
   # explicitly, and an UNINTENDED one fails. Baseline = the hook as of the
-  # merge-base with the default branch; skipped (not failed) when that revision
-  # is unavailable, so the suite still runs in a shallow or exported tree.
+  # merge-base with the default branch; skipped (not failed) when there is no
+  # baseline to diff against — see BASELINE_HOOK below for the two ways that
+  # happens. A differential row is a PRE-MERGE review aid by construction; the
+  # landed behaviour it describes is pinned separately by absolute `t` rows,
+  # which keep asserting after the change lands (SAD-635).
   local name="$1" want_base="$2" want_head="$3" cmd="$4" cwd="${5:-$ROOT}"
   local base_hook rc_b rc_h
   base_hook="$BASELINE_HOOK"
   if [ -z "$base_hook" ] || [ ! -s "$base_hook" ]; then
-    echo "SKIP  $name (no baseline hook revision available)"; return
+    echo "SKIP  $name ($BASELINE_SKIP_WHY)"; return
   fi
   mk "$cmd" "$cwd" | env CLAUDE_PROJECT_DIR="$ROOT" bash "$base_hook" >/dev/null 2>&1; rc_b=$?
   mk "$cmd" "$cwd" | env CLAUDE_PROJECT_DIR="$ROOT" bash "$H/pre-bash-safety.sh" >/dev/null 2>&1; rc_h=$?
@@ -66,11 +69,23 @@ t_delta() { # $1=name $2=baseline-rc $3=head-rc $4=command [$5=cwd]
 }
 
 # Baseline hook for t_delta: the pre-change revision from the default branch.
+# Two ways there is nothing to diff, and both SKIP rather than fail:
+#   1. the revision is unavailable (shallow / exported tree, no origin/main);
+#   2. it is byte-identical to the working copy (SAD-635) — which is what every
+#      tree looks like once the change under test lands on the default branch,
+#      because merge-base then resolves to that very change. Without this guard
+#      the "verdict CHANGED" rows compare head against itself and fail forever,
+#      while the "verdict UNCHANGED" rows pass vacuously.
 BASELINE_HOOK=""
+BASELINE_SKIP_WHY="no baseline hook revision available"
 _bl="$(mktemp)"
 _base_ref="$(git merge-base HEAD origin/main 2>/dev/null || git rev-parse origin/main 2>/dev/null || true)"
 if [ -n "$_base_ref" ] && git show "$_base_ref:.claude/hooks/pre-bash-safety.sh" > "$_bl" 2>/dev/null && [ -s "$_bl" ]; then
-  BASELINE_HOOK="$_bl"
+  if cmp -s "$_bl" "$H/pre-bash-safety.sh"; then
+    BASELINE_SKIP_WHY="baseline is identical to head — the change under test has landed"
+  else
+    BASELINE_HOOK="$_bl"
+  fi
 fi
 
 echo "== pre-bash-safety.sh: D-rows =="
