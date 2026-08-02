@@ -386,8 +386,20 @@ for seg in "${segments[@]}"; do
   # Both are the D0 lesson again: A REGEX CANNOT DECIDE WHICH PROGRAM OWNS A
   # TOKEN. So F6 stops classifying and matches WHOLE COMMAND FORMS: an exact
   # allowlist of the read spellings plus the one sanctioned write. Anything else
-  # BLOCKS. There is no option list to keep in sync with git's grammar, no
-  # positional inference, and an unmodelled form fails closed by construction.
+  # BLOCKS. There is no option list to keep in sync with git's grammar and no
+  # positional inference: a form this matcher does not model fails closed —
+  # FOR ANY SEGMENT THE SPLITTER DELIVERS INTACT.
+  #
+  # ⚠ That caveat is load-bearing and is a property of the MATCHER, not of the
+  # RULE (Barb, SAD-552 round 5). The outer gate below is what admits a segment
+  # at all, so a command whose `config` or `core.hooksPath` token is itself
+  # SPLIT never reaches this matcher to be classified — a backslash-newline
+  # continuation does exactly that (`git config core.hooks\<NL>Path /tmp/evil`
+  # delivers `[config] [core.hooksPath] [/tmp/evil]` intact to git while no rule
+  # sees a whole command). That is SAD-624: pre-existing on this branch AND on
+  # the default branch, tracked separately, and NOT fixed here. Read this
+  # paragraph's guarantee as scoped, never as absolute.
+  #
   # This is strictly narrower than the pre-SAD-552 rule (which exempted `--get`
   # anywhere and any `.githooks` text anywhere) — it only ADDS the read forms
   # that rule blocked by accident.
