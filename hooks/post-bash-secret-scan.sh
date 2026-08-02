@@ -17,23 +17,33 @@
 #   MARKER patterns — zero-entropy structure that only NAMES key material
 #                     ("BEGIN … PRIVATE KEY", "private_key"). A marker is
 #                     evidence only when it appears attached to the real
-#                     artifact, so each marker is anchored to the shape of that
-#                     artifact (the PEM's hyphen armour; the JSON key's colon and
-#                     value) — and it is not scanned inside a quoted operand of
-#                     the command's own grep/rg SEGMENT, because a hook that
-#                     fires on the phrase you searched for is reporting itself.
+#                     artifact, so each is anchored to the SHAPE of that
+#                     artifact: the PEM needs BOTH hyphen armour runs, the
+#                     service-account key a colon and a value.
 #
-# ⚠ The masking is only safe because of `private-key-material` below. Marker
-# masking is coarse — it blanks EVERY quoted operand of a search-tool segment,
-# not just the pattern — so on its own it would launder a real key behind
-# `grep -q zzz '<key>'`. The VALUE class is never masked, and it now includes
-# armour-plus-body, so key MATERIAL is caught wherever it sits while the bare
-# marker (a phrase, a regex definition, prose) is not. Do not remove that
-# pattern while the masking is in place; they are one mechanism.
+# NOTHING IS MASKED. An earlier cut of SAD-552 skipped markers inside a quoted
+# operand of the command's own grep/rg segment, on the theory that a hook firing
+# on the phrase you searched for is reporting itself. That was removed: a `|`
+# inside a quoted string manufactures a fake grep segment, so
+# `echo "x | grep '<key>'" >> notes.md` wrote a real key to disk with the
+# tripwire silenced. Anchoring the markers to the artifact — not masking — is
+# what keeps the reported false positives clean. Do not reintroduce masking.
 #
-# Both changes narrow what MATCHES; neither narrows what is LOOKED AT for real
-# key material. See docs/decisions/ and SAD-552 for the false-positive tally
-# that motivated it (9 observed, 0 credentials).
+# `private-key-material` below is therefore NOT coupled to any masking (it was,
+# briefly). It exists because the generic ≥12-char credential pattern cannot
+# match "PRIVATE KEY" at all — space, not underscore — so nothing else covers a
+# key body.
+#
+# These changes narrow what MATCHES; none narrows what is LOOKED AT for real key
+# material. See docs/decisions/ and SAD-552 for the false-positive tally that
+# motivated it (9 observed, 0 credentials).
+#
+# ⚠ WRITING ABOUT THIS FILE, IN THIS FILE: never quote live PEM armour in a
+# comment. The round-3 comment below did, and made the hook's own source trip its
+# own tripwire — reading it went rc=0 at the merge base to rc=2 at that head,
+# reintroducing the exact false positive this issue exists to remove, in the file
+# that removes it. Use the ellipsis form `-----BEGIN … PRIVATE KEY-----`: `…` is
+# outside the marker's `[A-Z0-9 ]` label class, so it cannot match.
 
 set -u
 
@@ -76,12 +86,12 @@ scan "resend-key"          '(^|[^A-Za-z0-9_])re_[A-Za-z0-9_]{16,}'
 # "PRIVATE KEY" (space, not underscore) and the longest run of allowed chars at
 # the head of a PEM is "-----BEGIN", ten characters, under the twelve-char floor.
 # Barb and Watson each proved a full private key transiting a grep operand with
-# no tripwire. Armour + ≥40 chars of DENSE base64 is key MATERIAL and is never
-# masked; armour ALONE is a marker (below) and may be. That split is the design.
+# no tripwire. Armour + ≥40 chars of DENSE base64 is key MATERIAL; armour ALONE
+# is a marker (below). That split is the design.
 #
 # ⚠ The body class is base64 ONLY — deliberately NO [[:space:]] inside the run.
 # The first attempt allowed whitespace there and immediately false-positived on
-# PROSE ("-----BEGIN RSA PRIVATE KEY----- is the header of a PEM file and marks
+# PROSE ("-----BEGIN … PRIVATE KEY----- is the header of a PEM file and marks
 # where the key material begins"), i.e. it reintroduced the exact bug this issue
 # exists to fix. A real single-line body — a pasted key, or JSON where \n has
 # already been stripped to n above — is one unbroken base64 run; prose is not.
@@ -96,7 +106,7 @@ scan "private-key-material" '[-]{4,}[[:space:]]?BEGIN [A-Z0-9 ]*PRIVATE KEY[-]{4
 #                         definitions ("BEGIN [A-Z ]*PRIVATE KEY") have none.
 #                         {4,} not {5}: Watson found that the exact-five form
 #                         narrowed detection past the old pattern, dropping
-#                         "---- BEGIN ENCRYPTED PRIVATE KEY ----" which used to
+#                         "---- BEGIN … PRIVATE KEY ----" (four) which used to
 #                         trip. [A-Z0-9 ] also picks up SSH2-style labels with a
 #                         digit, which NEITHER version matched.
 #   gcp-service-account — a service-account JSON is "private_key": "<~1700 chars>";

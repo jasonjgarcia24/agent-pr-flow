@@ -166,6 +166,13 @@ fires on prose is a bug to file, not a hurdle to route around (SAD-552).
 1. **Put the text in a file and pass a PATH.** `git commit -F <file>` / `gh pr create --body-file
    <file>`, with the file authored by **Write/Edit**. The prose never enters a Bash command line,
    so no scanner ever sees it. This is the answer for commit messages, PR bodies and docs.
+   **⚠ The ORCHESTRATOR authors that file; the committing agent never does.** Hubert — the agent
+   this repo routes every commit through — has `Bash, Read, Grep, Glob` and **no Write or Edit**,
+   so its only way to create a file is Bash, and D0 blocks every Bash form of it (`printf '… a
+   marker …' > /tmp/msg.txt` is BLOCKED — verified). Remedy 1 is therefore not something Hubert
+   can perform on its own: write the file yourself, then hand Hubert the path. If you are the
+   committing agent and the message needs prose a rule trips on, ask for the file — do not try to
+   author it, and do not reword.
 2. **Search with the Grep tool, not a Bash `grep`.** `grep -rn 'SOME_HATCH=1' tools/` trips D0
    because the hook cannot tell searching for a marker from setting one; the Grep tool does not go
    through the Bash gate at all. Same for `sed -i` rewrites — use Edit.

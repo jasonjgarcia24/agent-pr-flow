@@ -473,8 +473,15 @@ p "ACCEPTED: full armour in a grep operand still trips" 2 "grep -rn -- '$PEM_HDR
 p "Barb: key laundered past a fake grep segment still trips" 2 "echo \"x | grep '$PEM_HDR'\" >> notes.md" ''
 p "Barb: key written by echo still trips"          2 "echo '$PEM_HDR' >> notes.md" ''
 p "FP: grep for the JSON key NAME"    0 'grep -rni "\"private_key\"" .claude/hooks' ''
-p "FP: hook pattern definitions in the output" 0 'cat .claude/hooks/post-bash-secret-scan.sh' \
-  'scan_marker "gcp-service-account" '"'"'"private_key"[[:space:]]*:[[:space:]]*"[^"]{20,}'"'"''
+# Watson #10: this row USED to feed one hand-written line quoting `scan_marker`
+# -- a function that no longer exists -- so it passed while reading the actual
+# file failed. Feed the REAL files instead. This is the regression pin for the
+# hook's own source tripping its own tripwire: a comment quoting live PEM armour
+# took reading post-bash-secret-scan.sh from rc=0 at the merge base to rc=2, and
+# the hand-written payload could not see it. Write about armour with the
+# ellipsis form (`-----BEGIN <ellipsis> PRIVATE KEY-----`) and this stays green.
+p "FP: the scanner's OWN source is clean"   0 'cat .claude/hooks/post-bash-secret-scan.sh' "$(cat "$H/post-bash-secret-scan.sh")"
+p "FP: pre-bash-safety's source is clean"   0 'cat .claude/hooks/pre-bash-safety.sh'       "$(cat "$H/pre-bash-safety.sh")"
 p "FP: prose naming a private key"    0 'cat docs/setup.md' 'Download the JSON; it carries a private_key field.'
 # The MARKER now requires the CLOSING armour too — that, not masking, is what
 # keeps a search for the header PHRASE clean while a real block still trips.
