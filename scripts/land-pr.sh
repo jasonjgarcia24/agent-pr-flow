@@ -243,6 +243,17 @@ REVIEWER_MARKER="$(cfg '.review.verdicts.reviewer.marker' 'watson-verdict')"
 REVIEWER_PASS="$(cfg '.review.verdicts.reviewer.pass' 'APPROVE')"
 SECURITY_MARKER="$(cfg '.review.verdicts.security.marker' 'barb-verdict')"
 SECURITY_PASS="$(cfg '.review.verdicts.security.pass' 'CLEARED')"
+# codeTierPolicy: what the residual `code` tier requires beyond CI.
+#   reviewer (default) — reviewer verdict marker required (historical behavior)
+#   ci-only            — CI alone; reviews happen at the owning agent's judgment
+# Scoped STRICTLY to tier=code: docs stays CI-alone, security ALWAYS requires
+# reviewer + security markers regardless of this knob. Fail-closed: absent
+# config -> 'reviewer'; any value outside the enum aborts the landing.
+CODE_TIER_POLICY="$(cfg '.review.codeTierPolicy' 'reviewer')"
+case "$CODE_TIER_POLICY" in
+  reviewer|ci-only) : ;;
+  *) die 0 "invalid review.codeTierPolicy '$CODE_TIER_POLICY' in config (allowed: reviewer | ci-only)" ;;
+esac
 REVIEWER_AGENT="$(station reviewer watson)"
 SECURITY_AGENT="$(station security barb)"
 [ -n "$REVIEWER_AGENT" ] || die 0 "invalid agents.reviewer in config — only an explicit null disables a station"
@@ -392,6 +403,10 @@ check_marker() { # $1 = marker name, $2 = required verdict, $3 = agent label
 }
 if [ "$tier" = "docs" ]; then
   note "G4 SKIP  docs tier — CI-alone policy"
+elif [ "$tier" = "code" ] && [ "$CODE_TIER_POLICY" = "ci-only" ]; then
+  # Explicit instance opt-in (review.codeTierPolicy) — NOT a disabled station:
+  # security tier still runs both check_marker calls below unconditionally.
+  note "G4 SKIP  code tier — ci-only policy (review.codeTierPolicy; reviews at the owning agent's judgment)"
 else
   # A DISABLED station only lands under the explicit Jason-only ambient hatch
   # ALLOW_DISABLED_STATION=1 — never silently on a WARN (Barb audit, PR #162).

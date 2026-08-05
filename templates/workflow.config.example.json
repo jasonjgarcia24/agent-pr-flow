@@ -51,6 +51,7 @@
       ".claude/workflow.config.**",
       "server/**"
     ],
+    "codeTierPolicy": "reviewer",
     "verdicts": {
       "reviewer": {
         "marker": "watson-verdict",
