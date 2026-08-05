@@ -19,4 +19,12 @@ Run the merge funnel for PR **$ARGUMENTS**:
      is idempotent verification).
    - Walk the remaining close-out surfaces (todo snapshot line; R-ID iff a quality bar
      moved; ADR/spec-row iff architectural) per `.claude/references/pm/workflow.md` §7.
-   - Remove the branch's worktree if one exists (`git worktree remove <path>`).
+   - **Worktree (SAD-418):** if the branch has one, remove it via the same split
+     `/prune-worktrees` uses — Radar confirms the SAD-N reached Done, then Hubert (with
+     explicit destructive-op authorization, quoting Radar's literal returned state) runs
+     `tools/dev/prune-worktrees.sh remove <path>`. Don't hand-run `git worktree remove`
+     here; this is the step that used to get silently skipped (see
+     `.claude/commands/prune-worktrees.md` for the full flow — it also catches anything
+     this misses). **You're almost always removing your OWN worktree here** — the script
+     refuses self-removal (cwd inside the target path), so run it from the primary
+     checkout or another worktree, not from the one being removed.

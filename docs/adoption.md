@@ -19,7 +19,7 @@ check, and a Claude Code environment (the hooks are Claude Code `PreToolUse`/`Po
 ## Install
 
 ```bash
-bash install.sh --target /path/to/your-repo --config your-workflow.config.json [--force]
+bash install.sh --target /path/to/your-repo --config your-workflow.config.json [--force] [--clobber-local]
 ```
 
 `install.sh`:
@@ -41,6 +41,40 @@ bash install.sh --target /path/to/your-repo --config your-workflow.config.json [
 
 **Idempotency:** re-running is safe. Byte-identical targets report `skip (unchanged)`; a target that
 differs gets a unified diff printed and is **kept** (exit 1) — pass `--force` to overwrite.
+
+### `--force` will not silently revert your repo
+
+`--force` is not a blind overwrite. Bundle-managed files drift in **two** directions, and only one
+of them is an update:
+
+- the **bundle** moved ahead — you edited it upstream and want it installed; or
+- the **target** moved ahead — someone edited the installed copy and never ported it up. Here the
+  bundle copy is *older*, and installing it is a **revert**.
+
+This bit for real: on 2026-07-30 a routine `--force` install silently reverted five files that had
+drifted ahead in the target, and the run still reported success. It was caught only because a human
+read `git status` before committing.
+
+So before overwriting a differing file, `install.sh` asks **the target repo's own git history** which
+direction the drift runs:
+
+| class | meaning | with `--force` |
+|---|---|---|
+| `forward` | the bundle's content is new to the target | overwritten |
+| `ahead` | the bundle's content is **already in the target's history** for that path — installing it would revert work | **REFUSED** |
+| `dirty` | the target file has uncommitted changes (recoverable from nothing) | **REFUSED** |
+| `unknown` | no target git repo, or the path was never committed | overwritten, with a loud `WARN` |
+
+A refusal exits non-zero and changes nothing. **The fix for `ahead` is to port the target's version
+up to the bundle**, then re-install — that is the direction the bundle-ownership rule requires
+anyway. `--force --clobber-local` overrides both refusals and **discards** the target's version; use
+it only when you mean to throw that work away.
+
+No state file, receipt, or bootstrap step is involved — the signal is the target's own history, so
+this works on the first run in a fresh clone or worktree. Regression suite: `scripts/test-install.sh`.
+
+**Carve-out:** `.claude/settings.json` is a jq *merge*, not a copy, and is deliberately not
+drift-classified — the merge preserves every target-only key by construction.
 
 ### Where each artifact installs
 

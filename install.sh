@@ -27,27 +27,54 @@
 #
 # Idempotent: a byte-identical target file -> "skip (unchanged)"; a differing
 # target file -> prints a unified diff and is KEPT (exit 1) unless --force.
+#
+# --force is NOT a blind overwrite (SAD-548). Before replacing a differing file it
+# asks the TARGET repo's git history which direction the drift runs, and refuses to
+# install a file the target is already ahead of — that is a revert wearing an
+# update's clothing. See classify_drift() for the four classes and the rationale.
+#
+# CARVE-OUT: .claude/settings.json is a jq MERGE, not a copy, and is deliberately NOT
+# drift-classified. The merge preserves every target-only key by construction, so the
+# revert risk is confined to keys the fragment itself defines — a far narrower blast
+# radius than a whole-file overwrite.
 
 set -u
 
 usage() {
   cat <<'EOF'
 Usage: install.sh --target <repo> [--config <workflow.config.json>] [--force]
+                  [--clobber-local]
 
   --target <repo>   destination repository root (required)
   --config <json>   workflow config used to render {{VAR}} placeholders and to
                     seed <repo>/.claude/workflow.config.json. If omitted, an
                     existing <repo>/.claude/workflow.config.json is used.
   --force           overwrite target files that differ (default: print a diff
-                    and keep the target)
+                    and keep the target). --force will still REFUSE to overwrite
+                    a file the target is AHEAD on, or one with uncommitted
+                    changes — see below.
+  --clobber-local   with --force, also overwrite AHEAD/DIRTY files, DISCARDING
+                    the target's version. Last resort; port the target's work up
+                    to the bundle instead.
+
+Drift classes (--force only). The target repo's own git history decides:
+  forward  bundle content is new             -> overwritten
+  ahead    bundle content is already in the  -> REFUSED (installing it would
+           target's history for this path       revert work the target moved past)
+  dirty    target file has uncommitted work  -> REFUSED
+  unknown  no target git repo / path never   -> overwritten with a loud WARN
+           committed
 EOF
 }
 
 TARGET=""
 CONFIG=""
 FORCE=0
+CLOBBER=0
 while [ $# -gt 0 ]; do
   case "$1" in
+    --clobber-local)
+      CLOBBER=1; shift ;;
     --target)
       [ -n "${2:-}" ] || { echo "install.sh: --target needs a value" >&2; exit 1; }
       TARGET="$2"; shift 2 ;;
@@ -180,6 +207,65 @@ fi
 
 # ---------- phase 2: install ----------
 blocked=0
+ahead=0
+
+# ---------- drift classification (SAD-548) ----------
+# `--force` used to overwrite ANY differing target file. That silently reverted work
+# which had been done in the target and never ported up to the bundle: the bundle copy
+# was OLDER, `--force` restored it, and the run still printed a clean summary. It happened
+# for real on 2026-07-30 across five files, and was caught only because a human read
+# `git status` before committing.
+#
+# The fix is to tell the two directions apart before overwriting:
+#
+#   forward — the bundle content is genuinely NEW. Overwriting is a fast-forward.
+#   ahead   — the bundle content is something the TARGET has already moved past. The
+#             target's own git history contains this exact content for this exact path,
+#             so installing it is a REVERT, not an update.
+#   dirty   — the target file has uncommitted changes. Overwriting destroys work that
+#             exists nowhere else.
+#   unknown — no target git repo, or the path was never committed. Can't tell.
+#
+# The signal is the target repo's own history, so this needs no state file, no receipt,
+# and no bootstrap step — it works in a fresh clone or worktree on the first run.
+#
+# NOTE: this is deliberately checked against the STAGED (rendered) content, not the raw
+# bundle file, because rendered content is what was installed and therefore what the
+# target's history recorded.
+DRIFT_CLASS=""
+classify_drift() { # $1 = staged abs path, $2 = target-relative path -> $DRIFT_CLASS
+  local staged="$1" rel="$2" want st
+  DRIFT_CLASS="unknown"
+  git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1 || return 0
+
+  # Uncommitted local work outranks everything: it is not recoverable from history.
+  st="$(git -C "$TARGET" status --porcelain -- "$rel" 2>/dev/null)"
+  case "$st" in
+    '??'*) DRIFT_CLASS="unknown"; return 0 ;;   # untracked — nothing to compare against
+    ?*)    DRIFT_CLASS="dirty";   return 0 ;;
+  esac
+
+  # --path applies the target's .gitattributes filters, so the OID is computed the same
+  # way git would have computed it when the content was committed.
+  want="$(git -C "$TARGET" hash-object --path "$rel" -- "$staged" 2>/dev/null)" || return 0
+  [ -n "$want" ] || return 0
+
+  # Every commit that touched this path, newest first; --max-count bounds a pathological
+  # history. If the staged blob appears at ANY of them, the bundle is behind the target.
+  if git -C "$TARGET" rev-list --max-count=1000 --all -- "$rel" 2>/dev/null \
+       | sed "s|\$|:$rel|" \
+       | git -C "$TARGET" cat-file --batch-check='%(objectname)' 2>/dev/null \
+       | grep -qxF "$want"; then
+    DRIFT_CLASS="ahead"
+    return 0
+  fi
+
+  # Path has history and the staged blob is not in it -> the bundle carries new work.
+  if [ -n "$(git -C "$TARGET" rev-list --max-count=1 --all -- "$rel" 2>/dev/null)" ]; then
+    DRIFT_CLASS="forward"
+  fi
+  return 0
+}
 install_file() { # $1 = staged abs path, $2 = target-relative dst, $3 = mode (x|-)
   local staged="$1" rel="$2" mode="$3"
   local dst="$TARGET/$rel"
@@ -192,9 +278,41 @@ install_file() { # $1 = staged abs path, $2 = target-relative dst, $3 = mode (x|
     if [ "$mode" = "x" ]; then chmod +x "$dst"; fi
     echo "skip (unchanged)    $rel"
   elif [ "$FORCE" = "1" ]; then
-    cp "$staged" "$dst"
-    if [ "$mode" = "x" ]; then chmod +x "$dst"; fi
-    echo "overwrite (--force) $rel"
+    classify_drift "$staged" "$rel"
+    case "$DRIFT_CLASS" in
+      ahead|dirty)
+        if [ "$CLOBBER" = "1" ]; then
+          cp "$staged" "$dst"
+          if [ "$mode" = "x" ]; then chmod +x "$dst"; fi
+          echo "CLOBBER (--clobber-local) $rel — target was $DRIFT_CLASS; local content DISCARDED"
+        else
+          if [ "$DRIFT_CLASS" = "ahead" ]; then
+            echo "AHEAD               $rel — target is AHEAD of the bundle; REFUSING to overwrite even with --force:"
+            echo "    the bundle's content for this file already exists in the target's git history —"
+            echo "    installing it would REVERT work the target has since moved past."
+            echo "    Fix: port the target's version UP to the bundle, then re-install (ADR-0031)."
+          else
+            echo "DIRTY               $rel — target has UNCOMMITTED changes; REFUSING to overwrite even with --force:"
+            echo "    that work exists nowhere else. Commit or stash it first."
+          fi
+          echo "    Override (DISCARDS the target's version): --force --clobber-local"
+          diff -u --label "$rel (target)" --label "$rel (bundle)" "$dst" "$staged" | sed 's/^/    /'
+          ahead=$((ahead + 1))
+        fi
+        ;;
+      unknown)
+        cp "$staged" "$dst"
+        if [ "$mode" = "x" ]; then chmod +x "$dst"; fi
+        echo "overwrite (--force) $rel  ** WARN: unverifiable — no target git history for this path;"
+        echo "    could not prove the bundle is not older than the target. Commit the target's files"
+        echo "    so a future install can tell a fast-forward from a revert."
+        ;;
+      *)
+        cp "$staged" "$dst"
+        if [ "$mode" = "x" ]; then chmod +x "$dst"; fi
+        echo "overwrite (--force) $rel"
+        ;;
+    esac
   else
     echo "DIFFERS             $rel — target KEPT (re-run with --force to overwrite):"
     diff -u --label "$rel (target)" --label "$rel (bundle)" "$dst" "$staged" | sed 's/^/    /'
@@ -264,6 +382,15 @@ else
 fi
 
 echo ""
+if [ "$ahead" -gt 0 ]; then
+  {
+    echo "install.sh: REFUSED — $ahead file(s) are AHEAD of the bundle or have uncommitted changes."
+    echo "  Overwriting them would revert work that is not in the bundle. Nothing about those files"
+    echo "  was changed. The fix is to port the target's version UP to the bundle (ADR-0031) and"
+    echo "  re-install; --force --clobber-local overrides only if you intend to DISCARD it."
+  } >&2
+  exit 1
+fi
 if [ "$blocked" -gt 0 ]; then
   echo "install.sh: $blocked file(s) differ from the bundle and were KEPT — re-run with --force to overwrite" >&2
   exit 1

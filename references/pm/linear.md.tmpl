@@ -2,9 +2,10 @@
 
 The platform-specific workflow reference for the **Radar** project-manager agent
 (`.claude/agents/radar.md`) and the **`/issue`** command (`.claude/commands/issue.md`).
-Radar reads this at the start of every operation; `/issue` follows the "Filing a new issue"
-section. This is the single source of truth for how issue tracking works on Linear — CLAUDE.md
-only routes here.
+Radar reads this at the start of every operation; `/issue` dispatches Radar and hands it this same
+reference. There is ONE "Filing a new issue" convention (below), shared by both entry points — not
+a `/issue` version and a separate Radar version. This is the single source of truth for how issue
+tracking works on Linear — CLAUDE.md only routes here.
 
 ## Platform target
 - **Team:** {{TEAM}} · **Project:** {{PROJECT}} · **Issue key:** `{{ISSUE_KEY}}-N`.
@@ -42,6 +43,9 @@ cruft only.
   `enhancement`; deferred/future direction → `roadmap`; "implemented but needs an on-device /
   real-finger check" → `verification-owed`; hero/run charts → `chart`; visual/interaction → `ui`;
   doc work → `documentation`; implements a design handoff → `design-handoff`.
+- **`design-drift`** — applied by the close-out capture rule only (§ Design-drift capture
+  below), never by filing heuristics: it marks a *landed* UI-touching change awaiting
+  design-side reconciliation, not the nature of the ask.
 - **Size** (exactly one, best-effort scope): `size:S` (~hours / localized), `size:M` (~1 day /
   one subsystem), `size:L` (multi-day / new plumbing), `size:XL` (research / cross-cutting / needs
   a design pass first).
@@ -91,17 +95,135 @@ easiest to forget.** Treat `In Progress` as **step 0 the moment an issue is pick
 first code edit), and fold "the board is current" into the close-out checklist next to the
 doc-walk + commit.
 
-## Filing a new issue (`/issue` playbook)
+## Design-drift capture (close-out)
+
+The app→design intake loop (claude-design-os `workflows/design-intake.md`; decision recorded as
+ADR-0007 there) needs every UI-touching landing flagged at the source. During the close-out pass
+(workflow.md §7 surface 1), Radar applies this rule to the issue whose PR just landed:
+
+- **Trigger — a pure path match, no judgment:** the landed PR touched
+  `app/src/main/java/com/enduranceloggr/app/ui/**` or `app/src/main/res/values*/**`
+  (`gh pr view <N> --json files`, or the squash commit's file list).
+- **Actions:** apply the **`design-drift`** label · `save_comment` a one-line design-impact
+  note — the affected surface + a ⚠ (appears to contradict the design reference) / ➕ (territory
+  the design never covered) / ℹ (visually neutral) *hint* · wire `relatedTo` **{{ISSUE_KEY}}-335** (the
+  standing umbrella; if the relation silently no-ops because a target is archived, leave an
+  inline {{ISSUE_KEY}}-335 mention instead, per the relationship gotcha below).
+- **Boundary:** Radar detects and routes. The hint is a hint — the verdict (reconcile / new
+  coverage / neutral / accepted divergence) belongs to Claude Design's adjudication, and drift
+  items are closed from that side. Never de-label, defer, or resolve a drift item on your own
+  judgment.
+- **Standing instruction:** this runs on every close-out without the caller asking — the one
+  standing exception to "don't change labels/relations unless asked."
+
+## Issue-cap ledger (manually initiated only)
+
+Linear's Free plan caps a workspace at **250 non-archived issues** (Backlog/Todo/In Progress/In
+Review/Triage all count; Done/Canceled/Duplicate count too until they *archive*). Discovered
+2026-07-18: **archiving is fully automatic** on a per-team timer (`Team Settings > Issue statuses
+& automations`, minimum delay 1 month) — there is no manual archive action, so a burst of recently
+closed issues cannot be archived on demand. The only immediate lever is **manual deletion** in the
+Linear app (`Cmd/Ctrl+Delete`, reversible for 30 days via "Recently deleted issues") — and there is
+**no `delete_issue` MCP tool**, so Radar can never delete an issue itself, only prepare the record
+ahead of a human doing it.
+
+**Standing rule, independent of tooling (Jason, 2026-07-18): Radar must NEVER delete an issue
+itself, under any mode — autonomous/Auto Mode included — full stop.** This holds even if a future
+MCP update adds a `delete_issue`-shaped tool to Radar's grant. Deletion of a Linear issue is
+**always** a caller-confirmed, human-executed action; there is no scope of pre-authorization
+(unlike, say, ADR-0033's autonomous PR-landing) that covers it. If a `delete_issue` tool ever
+becomes available, do not use it without a fresh, explicit "yes, delete these" from the caller for
+*that specific batch* — a prior general go-ahead to "build the ledger" is not itself permission to
+delete, and a standing/durable instruction from an earlier session does not carry forward as
+blanket authorization for a new batch.
+
+**This process is never run automatically or as part of a close-out — only when the caller
+explicitly asks for it** (e.g. "we're over the issue cap, build the deletion ledger for issues
+closed before <date>").
+
+1. **Caller supplies the scope** — a cutoff date, a list of {{ISSUE_KEY}}-Ns, or a state filter (e.g. "all
+   terminal issues closed before 2026-07-13"). Radar does not choose what's in scope on its own
+   judgment; if the scope is ambiguous, ask rather than guess (same rule as everywhere else in this
+   file).
+2. **Resolve the candidate set** — `list_issues` filtered to `Done`/`Canceled`/`Duplicate`, cross-
+   checked against the caller's cutoff/filter. `get_issue` each one to confirm current state
+   (idempotent — a caller-supplied {{ISSUE_KEY}}-N that's no longer terminal should be dropped and flagged,
+   not silently included).
+3. **Find or create the ledger document** — `list_documents` for one titled **"Deleted Issues
+   Ledger"** under team {{TEAM}}. If it exists, append; if not, create it with `save_document`
+   (this is the one standing document — never create a new one per run).
+4. **Append one row per candidate** *before* reporting the list back, so the record survives even
+   past the 30-day recovery window:
+
+   ```
+   | {{ISSUE_KEY}}-N | Title | State | Priority | Labels | Closed (best-effort) | Summary |
+   ```
+
+   `Summary` is a one-line resolution note (why it closed, not the full body) — enough to answer
+   "what was this and why did it go away" without needing the deleted issue itself.
+5. **Report the exact candidate list back to the caller** ({{ISSUE_KEY}}-N + title) — the caller deletes them
+   by hand in the Linear app. Radar's job ends at the ledger entry; it never attempts deletion and
+   never claims one happened.
+
+**Boundary:** this is additive record-keeping only. Do not transition, comment on, or otherwise
+touch the candidate issues themselves as part of this process — the ledger entry is a *copy*, not
+an action on the original.
+
+## Milestones — naming convention
+
+A milestone's `name` is the only thing visible in the compact list (`list_milestones` doesn't
+surface descriptions by default), so it has to say **which initiative** it belongs to on its own.
+A generic prefix is a live collision risk — it can read as describing an unrelated in-app feature
+of the same name, not the rollout it actually tracks.
+
+**Field-caught 2026-07-22 ({{ISSUE_KEY}}-457):** the 4 course-planning-and-training-plans rollout milestones
+used a bare `Planning Wave N —` prefix. By the time they existed, "Planning" was also the name of
+an actual in-app page group (ADR-0038 — the shell's Training-plan + Course-planning pages), so the
+milestone name read as if it were about that UI surface instead of the wave-numbered checkpoint
+plan in `docs/plans/course-planning-and-training-plans.md` §7. Renamed to
+`Course & Training Plans: <checkpoint>`.
+
+**Pattern: `<Initiative>: <checkpoint/phase description>`** — colon separator (em-dash also seen,
+e.g. `Map Quality — Labels, Fidelity & Trails`, for a single milestone covering one bounded
+initiative end-to-end). The initiative name comes from the plan doc's subject or the umbrella
+issue's title — never a generic word like "Wave", "Phase", or "Planning" that could apply to any
+effort, or that shadows a live in-app feature/page name.
+
+- **One milestone per initiative** when the work is a single bounded slice of scope tracked as a
+  whole (`Map Quality — Labels, Fidelity & Trails`).
+- **One milestone per wave/checkpoint** when a plan doc phases the rollout into sequenced,
+  independently-demoable checkpoints (`Cross-Platform: Backend Foundations` → `… Shared KMP Core`
+  → `… iOS Beta` → `… Web Live`; `Course & Training Plans: Foundations` → `… Course↔Plan Loop` →
+  `… Builder & AI Generation` → `… Coaching Integration`).
+- **Don't put the ordinal in the name** ("Wave 1", "Phase 2") — `sortOrder` (set naturally by
+  creation order) carries the sequence, and the checkpoint description itself should read as an
+  obvious step in a progression. Put the ordinal + acceptance criteria in the milestone
+  `description` instead (e.g. "full loop: plan a workout w/ course → start prefilled → record →
+  auto-link → adherence (Wave 2)"), mirroring how the existing `Cross-Platform:` milestones tuck
+  "(Checkpoint N)" into their descriptions rather than their names.
+- Before naming a new multi-milestone initiative, `list_milestones` the project and scan existing
+  prefixes so the new one doesn't reuse a taken word or a live in-app term (page names, feature
+  names) as its prefix.
+
+## Filing a new issue (shared by `/issue` AND Radar — every agent-filed issue)
 Create with `{{MCP_PREFIX}}save_issue`, always `team="{{TEAM}}"` + `project="{{PROJECT}}"`.
 Always search first for duplicates (`list_issues` project=… query=…, a couple of keyword variants;
 `get_issue` any plausible hit). Then set:
 1. **Title** — concise + imperative, area-prefixed where it helps.
 2. **Priority** — the native field per the mapping above (default `4` Low).
 3. **Labels** — type(s) + exactly one `size:*` (+ `parked` if applicable). Never `Migrated`.
-4. **Body** (`description`, Markdown, literal newlines) — what it is; bug → observed vs expected
-   (+ repro); task → the acceptance bar. End with a `Ref:` line citing the R-ID (grep
-   `docs/requirements.md`) and/or `file:line`. The issue is the *transient* record; R-IDs are the
-   durable spec.
+4. **Body** (`description`, Markdown, literal newlines) — **always leads with a plain-language
+   summary**, then the technical detail:
+   - **Plain-language summary** (2-4 sentences, per the `/laymans` rules —
+     `.claude/commands/laymans.md`): no code/file-path/line-number as the explanation itself; no
+     unexplained jargon; any acronym spelled out + briefly defined on first use; explain the
+     *outcome and why it matters*, not the mechanism. Every issue an agent files gets one — bugs,
+     tasks, and field findings alike, no matter how small — so a non-technical reader (Jason
+     skimming the board) can tell what's wrong/needed without opening the code. Label it
+     **`In plain terms:`** so it's visually distinct from the technical body below it.
+   - Then the technical detail: bug → observed vs expected (+ repro); task → the acceptance bar.
+   - End with a `Ref:` line citing the R-ID (grep `docs/requirements.md`) and/or `file:line`. The
+     issue is the *transient* record; R-IDs are the durable spec.
 5. **Relationships** — wire any relation you can already see (see below).
 6. **State** — pass `state` explicitly (Linear defaults to Backlog, usually wrong): `Todo` for
    actionable work; `Backlog` for parked/roadmap/deferred.
@@ -109,6 +231,11 @@ Always search first for duplicates (`list_issues` project=… query=…, a coupl
 Duplicate handling: clear dup with nothing new → don't file, note `Duplicate of {{ISSUE_KEY}}-N`.
 Same issue + new info ("still happening", new repro) → `save_comment` on the existing one, don't
 file. Genuinely ambiguous → ask before acting.
+
+**This section applies whenever ANY agent files a new issue** — not just through `/issue`. Radar
+follows it identically when a caller dispatches it directly to file something (a field finding
+during a build, a triage-sweep addition, etc.) rather than routing through `/issue`. There is one
+filing convention, not a `/issue`-specific one and a separate Radar one.
 
 ## Relationships — wire them, don't leave them implicit
 When issues relate, record a **Linear relation** via `save_issue`'s params, not just prose:
