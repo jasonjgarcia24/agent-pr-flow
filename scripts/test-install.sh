@@ -86,16 +86,28 @@ else
 fi
 
 # ------------------------------------------------------------------- case 3: fast-forward
-# The bundle carries content the target has never held. --force must overwrite.
+# A GENUINE fast-forward, built rather than faked: clone the bundle, advance the file
+# there, and give the target the pre-advance content. The target's content is then really
+# in the bundle's history, which is what distinguishes a fast-forward from divergence —
+# so this case also guards against the divergence check over-firing and blocking the
+# normal edit-upstream-then-reinstall workflow.
+FWD_BUNDLE="$TMPROOT/bundle-fwd"
+git clone -q "$ROOT" "$FWD_BUNDLE"
+git -C "$FWD_BUNDLE" config user.email t@t.t
+git -C "$FWD_BUNDLE" config user.name t
 t="$TMPROOT/forward"; new_target "$t"
 mkdir -p "$t/.claude/commands"
-printf 'an older revision the bundle has since replaced\n' > "$t/$TARGET_REL"
-git -C "$t" add -A && git -C "$t" commit -qm "old target content"
-run_install "$t" --force
-if grep -qE "^overwrite \(--force\) +$REL_RE\$" <<<"$OUT" && cmp -s "$ROOT/$BUNDLE_SRC" "$t/$TARGET_REL"; then
-  ok "forward: --force still overwrites when the bundle is genuinely newer"
+cp "$FWD_BUNDLE/$BUNDLE_SRC" "$t/$TARGET_REL"        # target holds the CURRENT content...
+git -C "$t" add -A && git -C "$t" commit -qm "installed bundle version"
+printf '\nnew work done upstream in the bundle\n' >> "$FWD_BUNDLE/$BUNDLE_SRC"
+git -C "$FWD_BUNDLE" add -A && git -C "$FWD_BUNDLE" commit -qm "bundle moves ahead"
+OUT="$(bash "$FWD_BUNDLE/install.sh" --target "$t" --force 2>&1)"; RC=$?
+[ "$VERBOSE" = "1" ] && printf '%s\n' "$OUT" | sed 's/^/      | /'
+if grep -qE "^overwrite \(--force\) +$REL_RE\$" <<<"$OUT" \
+   && grep -q "new work done upstream in the bundle" "$t/$TARGET_REL"; then
+  ok "forward: --force fast-forwards a target whose content IS in the bundle's history"
 else
-  bad "forward: --force must fast-forward a stale target" "rc=$RC"
+  bad "forward: a real fast-forward must not be blocked" "rc=$RC"
 fi
 
 # -------------------------------------------------------------------------- case 4: dirty
@@ -122,6 +134,21 @@ if grep -q "WARN: unverifiable" <<<"$OUT" && cmp -s "$ROOT/$BUNDLE_SRC" "$t/$TAR
   ok "unknown: untracked target file is overwritten but WARNs that it is unverifiable"
 else
   bad "unknown: expected an unverifiable WARN and an overwrite" "rc=$RC"
+fi
+
+# ----------------------------------------------------------------------- case 5b: diverged
+# Both sides carry unique work: the target's content is not in the bundle's history AND
+# the bundle's content is not in the target's. Overwriting drops the target's half, so
+# this is not a fast-forward and must be refused. Caught for real on tools/dev/land-pr.sh.
+t="$TMPROOT/diverged"; new_target "$t"
+mkdir -p "$t/.claude/commands"
+{ cat "$ROOT/$BUNDLE_SRC"; printf '\nwork only the TARGET has\n'; } > "$t/$TARGET_REL"
+git -C "$t" add -A && git -C "$t" commit -qm "target-only work, never ported up"
+run_install "$t" --force
+if grep -q "^DIVERGED .*$REL" <<<"$OUT" && [ "$RC" -ne 0 ] && grep -q "work only the TARGET has" "$t/$TARGET_REL"; then
+  ok "diverged: --force REFUSES when neither side's content is in the other's history"
+else
+  bad "diverged: --force must refuse a non-fast-forward" "rc=$RC"
 fi
 
 # ------------------------------------------------- case 6: no --force is still non-destructive

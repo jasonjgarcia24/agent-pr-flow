@@ -60,17 +60,31 @@ direction the drift runs:
 
 | class | meaning | with `--force` |
 |---|---|---|
-| `forward` | the bundle's content is new to the target | overwritten |
+| `forward` | the target's content **is in the bundle's history** — the bundle genuinely moved on from it | overwritten |
 | `ahead` | the bundle's content is **already in the target's history** for that path — installing it would revert work | **REFUSED** |
+| `diverged` | **neither** side's content is in the other's history — both moved on independently | **REFUSED** |
 | `dirty` | the target file has uncommitted changes (recoverable from nothing) | **REFUSED** |
 | `unknown` | no target git repo, or the path was never committed | overwritten, with a loud `WARN` |
 
-A refusal exits non-zero and changes nothing. **The fix for `ahead` is to port the target's version
-up to the bundle**, then re-install — that is the direction the bundle-ownership rule requires
-anyway. `--force --clobber-local` overrides both refusals and **discards** the target's version; use
-it only when you mean to throw that work away.
+A refusal exits non-zero and changes nothing. **The fix for `ahead` and `diverged` is to port the
+target's version up to the bundle**, then re-install — that is the direction the bundle-ownership
+rule requires anyway. `--force --clobber-local` overrides the refusals and **discards** the target's
+version; use it only when you mean to throw that work away.
 
-No state file, receipt, or bootstrap step is involved — the signal is the target's own history, so
+`diverged` is the case that is easy to miss. "The bundle's content isn't in the target's history"
+does **not** by itself mean the bundle is newer — both sides may carry unique work, and overwriting
+still drops the target's half. So a fast-forward is confirmed *positively*, from the bundle's history,
+rather than inferred from the absence of evidence. This was not hypothetical: the reference instance
+had exactly one such file (`tools/dev/land-pr.sh`), and a one-directional check called it safe.
+
+**Limitation, stated plainly:** `diverged` is only decidable for sources the renderer does not touch.
+A templated source stores `{{VAR}}` in bundle history while the target stores rendered bytes, so the
+two can never match and the question is unanswerable — templated files fall through to `forward`
+rather than crying wolf on every legitimate bundle edit. The `ahead` check still covers them, and
+that is the one that catches a revert. Divergence detection also needs the bundle to be a git
+checkout; from an unpacked tarball it degrades to `forward`.
+
+No state file, receipt, or bootstrap step is involved — the signal is the two repos' own histories, so
 this works on the first run in a fresh clone or worktree. Regression suite: `scripts/test-install.sh`.
 
 **Carve-out:** `.claude/settings.json` is a jq *merge*, not a copy, and is deliberately not

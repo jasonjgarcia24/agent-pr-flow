@@ -57,13 +57,16 @@ Usage: install.sh --target <repo> [--config <workflow.config.json>] [--force]
                     the target's version. Last resort; port the target's work up
                     to the bundle instead.
 
-Drift classes (--force only). The target repo's own git history decides:
-  forward  bundle content is new             -> overwritten
-  ahead    bundle content is already in the  -> REFUSED (installing it would
-           target's history for this path       revert work the target moved past)
-  dirty    target file has uncommitted work  -> REFUSED
-  unknown  no target git repo / path never   -> overwritten with a loud WARN
-           committed
+Drift classes (--force only), decided from the two repos' own git histories:
+  forward   bundle moved on from what the     -> overwritten
+            target holds (confirmed)
+  ahead     bundle content is already in the  -> REFUSED (installing it would
+            target's history for this path       revert work the target moved past)
+  diverged  neither side's content is in the  -> REFUSED (not a fast-forward)
+            other's history
+  dirty     target file has uncommitted work  -> REFUSED
+  unknown   no target git repo / path never   -> overwritten with a loud WARN
+            committed
 EOF
 }
 
@@ -232,9 +235,12 @@ ahead=0
 # NOTE: this is deliberately checked against the STAGED (rendered) content, not the raw
 # bundle file, because rendered content is what was installed and therefore what the
 # target's history recorded.
+HAVE_BUNDLE_GIT=0
+git -C "$BUNDLE" rev-parse --git-dir >/dev/null 2>&1 && HAVE_BUNDLE_GIT=1
+
 DRIFT_CLASS=""
-classify_drift() { # $1 = staged abs path, $2 = target-relative path -> $DRIFT_CLASS
-  local staged="$1" rel="$2" want st
+classify_drift() { # $1 = staged abs, $2 = target-relative, $3 = bundle-relative src -> $DRIFT_CLASS
+  local staged="$1" rel="$2" src="$3" want st have
   DRIFT_CLASS="unknown"
   git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1 || return 0
 
@@ -260,14 +266,40 @@ classify_drift() { # $1 = staged abs path, $2 = target-relative path -> $DRIFT_C
     return 0
   fi
 
-  # Path has history and the staged blob is not in it -> the bundle carries new work.
+  # The staged blob is not in the target's history. That alone does NOT prove the bundle
+  # is newer — both sides may carry unique work, in which case overwriting still drops
+  # whatever the target had. Confirm a fast-forward POSITIVELY: does the target's current
+  # content appear in the BUNDLE's history for the source path?
+  #
+  #   yes -> the bundle has genuinely moved on from what the target holds. Fast-forward.
+  #   no  -> neither side's content is in the other's history. DIVERGED, not an update.
+  #
+  # This is not hypothetical: caught in the reference instance on tools/dev/land-pr.sh,
+  # where target and bundle each carried fixes the other had never seen, and the
+  # one-directional check above happily called it `forward`.
+  #
+  # LIMITATION, deliberate: only decidable for sources the renderer does not touch. A
+  # templated source stores {{VAR}} in bundle history while the target stores rendered
+  # bytes, so the two can never match and the question is unanswerable — templated files
+  # fall through to `forward` rather than crying wolf on every legitimate bundle edit.
+  # The `ahead` check above still covers them, and it is the one that catches a revert.
   if [ -n "$(git -C "$TARGET" rev-list --max-count=1 --all -- "$rel" 2>/dev/null)" ]; then
     DRIFT_CLASS="forward"
+    if [ "$HAVE_BUNDLE_GIT" = "1" ] && ! grep -qE '\{\{[A-Z_]+\}\}' "$BUNDLE/$src" 2>/dev/null; then
+      have="$(git -C "$BUNDLE" hash-object --path "$src" -- "$TARGET/$rel" 2>/dev/null)" || have=""
+      if [ -n "$have" ] \
+         && ! git -C "$BUNDLE" rev-list --max-count=1000 --all -- "$src" 2>/dev/null \
+              | sed "s|\$|:$src|" \
+              | git -C "$BUNDLE" cat-file --batch-check='%(objectname)' 2>/dev/null \
+              | grep -qxF "$have"; then
+        DRIFT_CLASS="diverged"
+      fi
+    fi
   fi
   return 0
 }
-install_file() { # $1 = staged abs path, $2 = target-relative dst, $3 = mode (x|-)
-  local staged="$1" rel="$2" mode="$3"
+install_file() { # $1 = staged abs path, $2 = target-relative dst, $3 = mode (x|-), $4 = bundle src
+  local staged="$1" rel="$2" mode="$3" src="$4"
   local dst="$TARGET/$rel"
   mkdir -p "$(dirname "$dst")"
   if [ ! -f "$dst" ]; then
@@ -278,9 +310,9 @@ install_file() { # $1 = staged abs path, $2 = target-relative dst, $3 = mode (x|
     if [ "$mode" = "x" ]; then chmod +x "$dst"; fi
     echo "skip (unchanged)    $rel"
   elif [ "$FORCE" = "1" ]; then
-    classify_drift "$staged" "$rel"
+    classify_drift "$staged" "$rel" "$src"
     case "$DRIFT_CLASS" in
-      ahead|dirty)
+      ahead|dirty|diverged)
         if [ "$CLOBBER" = "1" ]; then
           cp "$staged" "$dst"
           if [ "$mode" = "x" ]; then chmod +x "$dst"; fi
@@ -291,6 +323,11 @@ install_file() { # $1 = staged abs path, $2 = target-relative dst, $3 = mode (x|
             echo "    the bundle's content for this file already exists in the target's git history —"
             echo "    installing it would REVERT work the target has since moved past."
             echo "    Fix: port the target's version UP to the bundle, then re-install (ADR-0031)."
+          elif [ "$DRIFT_CLASS" = "diverged" ]; then
+            echo "DIVERGED            $rel — target and bundle have each moved on; REFUSING to overwrite even with --force:"
+            echo "    neither side's content appears in the other's history, so this is not a"
+            echo "    fast-forward — the target carries work the bundle has never seen."
+            echo "    Fix: reconcile the two (port the target's changes up), then re-install."
           else
             echo "DIRTY               $rel — target has UNCOMMITTED changes; REFUSING to overwrite even with --force:"
             echo "    that work exists nowhere else. Commit or stash it first."
@@ -323,8 +360,8 @@ install_file() { # $1 = staged abs path, $2 = target-relative dst, $3 = mode (x|
 echo "== installing into $TARGET =="
 i=0
 for entry in "${MANIFEST[@]}"; do
-  IFS='|' read -r _src dst mode <<<"$entry"
-  install_file "$STAGE/$i" "$dst" "$mode"
+  IFS='|' read -r src dst mode <<<"$entry"
+  install_file "$STAGE/$i" "$dst" "$mode" "$src"
   i=$((i + 1))
 done
 
@@ -384,10 +421,11 @@ fi
 echo ""
 if [ "$ahead" -gt 0 ]; then
   {
-    echo "install.sh: REFUSED — $ahead file(s) are AHEAD of the bundle or have uncommitted changes."
-    echo "  Overwriting them would revert work that is not in the bundle. Nothing about those files"
-    echo "  was changed. The fix is to port the target's version UP to the bundle (ADR-0031) and"
-    echo "  re-install; --force --clobber-local overrides only if you intend to DISCARD it."
+    echo "install.sh: REFUSED — $ahead file(s) are AHEAD of, or DIVERGED from, the bundle (or carry"
+    echo "  uncommitted changes). Overwriting them would drop work that is not in the bundle, so"
+    echo "  nothing about those files was changed. The fix is to port the target's version UP to"
+    echo "  the bundle (ADR-0031) and re-install; --force --clobber-local overrides only if you"
+    echo "  intend to DISCARD it."
   } >&2
   exit 1
 fi
