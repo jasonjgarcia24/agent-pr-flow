@@ -165,6 +165,7 @@ TPL_SRC="references/workflow.md.tmpl"
 TPL_REL=".claude/references/pm/workflow.md"
 TPL_RE="$(printf '%s' "$TPL_REL" | sed 's/[].[^$*\\]/\\&/g')"
 t="$TMPROOT/templated"; new_target "$t"
+TPL_T="$t"          # pinned: case 5d asserts against THIS target, not "whatever $t is"
 mkdir -p "$t/.claude/references/pm"
 # Render the bundle's template the way install.sh would, then append local work — and
 # commit BOTH in one commit, so the pristine render is nowhere in history.
@@ -183,13 +184,36 @@ else
   bad "templated: FAIL OPEN — templated source clobbered local work" "rc=$RC"
 fi
 
+# ------------------------------------------- case 5e: a CONFIG FLIP must not read as drift
+# Flipping a documented config knob re-renders every templated file. Comparing only against
+# TODAY's values makes all of them stop matching at once, so a supported one-line config
+# change would report `diverged` for every templated file and — because refusals are atomic
+# — block the whole install, with a remedy ("port the target's changes up") that cannot be
+# acted on because there is nothing to port. Historical target configs are used for exactly
+# this. Regression for a defect the fix for case 5c introduced.
+t="$TMPROOT/cfgflip"; new_target "$t"
+mkdir -p "$t/.claude/references/pm"
+# Install cleanly under the ORIGINAL config, and commit what was installed.
+bash "$INSTALL" --target "$t" >/dev/null 2>&1
+git -C "$t" add -A && git -C "$t" commit -qm "adopt the bundle"
+# Now flip a supported knob and commit it, exactly as an operator would.
+jq '.review.codeTierPolicy = "ci-only"' "$t/.claude/workflow.config.json" > "$t/.cfg.tmp" \
+  && mv "$t/.cfg.tmp" "$t/.claude/workflow.config.json"
+git -C "$t" add -A && git -C "$t" commit -qm "flip review.codeTierPolicy to ci-only"
+run_install "$t" --force
+if grep -q "^DIVERGED" <<<"$OUT"; then
+  bad "config-flip: a supported config change was misreported as DIVERGED" "rc=$RC"
+else
+  ok "config-flip: changing a config value re-renders cleanly instead of reading as drift"
+fi
+
 # ---------------------------------------------------------- case 5d: refusal is ATOMIC
 # A refused run must leave the target completely untouched — not "all the files except the
 # refused ones". The docs claim "a refusal exits non-zero and changes nothing", and a
 # partially-updated target after a failed run is its own trap.
-before="$(git -C "$t" status --porcelain | sort)"
-run_install "$t" --force
-after="$(git -C "$t" status --porcelain | sort)"
+before="$(git -C "$TPL_T" status --porcelain | sort)"
+run_install "$TPL_T" --force
+after="$(git -C "$TPL_T" status --porcelain | sort)"
 if [ "$before" = "$after" ] && [ "$RC" -ne 0 ] && grep -q "nothing was installed" <<<"$OUT"; then
   ok "atomic: a refused run writes NOTHING — not even the files that would have been fine"
 else

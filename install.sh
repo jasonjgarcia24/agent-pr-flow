@@ -54,9 +54,9 @@ Usage: install.sh --target <repo> [--config <workflow.config.json>] [--force]
                     and keep the target). --force will still REFUSE to overwrite
                     a file the target is AHEAD on, or one with uncommitted
                     changes — see below.
-  --clobber-local   with --force, also overwrite AHEAD/DIRTY files, DISCARDING
-                    the target's version. Last resort; port the target's work up
-                    to the bundle instead.
+  --clobber-local   with --force, also overwrite AHEAD / DIVERGED / DIRTY files,
+                    DISCARDING the target's version. Whole-manifest and a last
+                    resort; port the target's work up to the bundle instead.
 
 Drift classes (--force only), decided from the two repos' own git histories:
   forward   bundle moved on from what the     -> overwritten
@@ -66,8 +66,8 @@ Drift classes (--force only), decided from the two repos' own git histories:
   diverged  neither side's content is in the  -> REFUSED (not a fast-forward)
             other's history
   dirty     target file has uncommitted work  -> REFUSED
-  unknown   no target git repo / path never   -> overwritten with a loud WARN
-            committed
+  unknown   no target git repo / no bundle    -> overwritten, counted, and
+            git / path never committed           reported in the final summary
 EOF
 }
 
@@ -146,7 +146,7 @@ for v in "${VAR_NAMES[@]}"; do
       HAVE[$v]=1
     fi
   fi
-  if [ "${HAVE[$v]}" = "0" ] && [ -n "${DEFAULTS[$v]:-}" ]; then
+  if [ "${HAVE[$v]}" = "0" ] && [ -n "${DEFAULTS[$v]+set}" ]; then
     VAL[$v]="${DEFAULTS[$v]}"
     HAVE[$v]=1
   fi
@@ -266,26 +266,76 @@ git -C "$BUNDLE" rev-parse --git-dir >/dev/null 2>&1 && HAVE_BUNDLE_GIT=1
 # file (including the trailing-newline normalisation of $(cat) + printf '%s\n'). Historical
 # bundle blobs MUST go through this before being compared with target bytes: bundle history
 # stores {{VAR}}, the target stores rendered values, so raw blobs can never match.
-render_stream() {
-  local content v pat
+render_stream() { # $1 = config-set index
+  local k="$1" content v pat val
   content="$(cat)"
   for v in "${VAR_NAMES[@]}"; do
-    [ "${HAVE[$v]}" = "1" ] || continue
+    val="${CFGVAL[$k,$v]:-}"
+    [ -n "$val" ] || continue
     pat="{{${v}}}"
-    content="${content//"$pat"/"${VAL[$v]}"}"
+    content="${content//"$pat"/"$val"}"
   done
   printf '%s\n' "$content"
 }
 
 # Every commit that touched a path, on all refs. --full-history so merge simplification
 # cannot prune a commit whose blob is the one that would have proven the direction.
+# --literal-pathspecs so a path containing glob metacharacters is matched as a path.
 path_commits() { # $1 = repo, $2 = path
-  git -C "$1" rev-list --full-history --max-count=1000 --all -- "$2" 2>/dev/null
+  git -C "$1" --literal-pathspecs rev-list --full-history --max-count=1000 --all -- "$2" 2>/dev/null
 }
+
+# ---------- config sets used to render historical bundle blobs ----------
+# Set 0 is the CURRENT config. Sets 1..N are the target's own HISTORICAL
+# workflow.config.json versions.
+#
+# Why history matters here: a templated target file holds bytes rendered from whatever the
+# config said AT INSTALL TIME. Comparing only against today's values means that the moment
+# anyone flips a documented knob — `review.codeTierPolicy` being the obvious one, since
+# {{CODE_TIER_POLICY}} renders straight into workflow.md — EVERY templated file stops
+# matching at once and reports `diverged`. That is a false positive with a actively
+# misleading remedy ("port the target's changes up" — there is nothing to port), and
+# because refusals are atomic it would block the entire install with the only override
+# being a whole-manifest --clobber-local.
+#
+# The target's own history carries the configs it was rendered under, so use them.
+declare -A CFGVAL
+CFG_COUNT=0
+add_config_set() { # $1 = path to a config json ("" = use the resolved VAL/HAVE)
+  local cfg="$1" v val
+  for v in "${VAR_NAMES[@]}"; do
+    if [ -z "$cfg" ]; then
+      val=""; [ "${HAVE[$v]}" = "1" ] && val="${VAL[$v]}"
+    else
+      val="$(jq -r "${JQ_PATH[$v]} // empty" "$cfg" 2>/dev/null)" || val=""
+      [ -n "$val" ] || val="${DEFAULTS[$v]:-}"
+    fi
+    CFGVAL[$CFG_COUNT,$v]="$val"
+  done
+  CFG_COUNT=$((CFG_COUNT + 1))
+}
+add_config_set ""                       # set 0 = current
+collect_target_config_history() {
+  local cfgrel=".claude/workflow.config.json" c oid tmpf seen=""
+  git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    [ "$CFG_COUNT" -lt 50 ] || break     # bound the fan-out
+    oid="$(git -C "$TARGET" rev-parse -q --verify "$c:$cfgrel" 2>/dev/null)" || continue
+    [ -n "$oid" ] || continue
+    case "$seen" in *"$oid"*) continue ;; esac
+    seen="$seen $oid"
+    tmpf="$STAGE/.cfg.$CFG_COUNT"
+    git -C "$TARGET" cat-file blob "$oid" > "$tmpf" 2>/dev/null || continue
+    jq empty "$tmpf" 2>/dev/null || continue
+    add_config_set "$tmpf"
+  done < <(path_commits "$TARGET" "$cfgrel")
+}
+collect_target_config_history
 
 DRIFT_CLASS=""
 classify_drift() { # $1 = staged abs, $2 = target-relative, $3 = bundle-relative src
-  local staged="$1" rel="$2" src="$3" want st have c tmp templated=0
+  local staged="$1" rel="$2" src="$3" want st have c tmp raw k templated=0
   DRIFT_CLASS="unknown"
   git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1 || return 0
 
@@ -342,25 +392,36 @@ classify_drift() { # $1 = staged abs, $2 = target-relative, $3 = bundle-relative
   # incident -- and the `ahead` check does NOT cover them, because it needs today's render
   # to exist verbatim as a past commit, which a squash-merge repo or any config change
   # defeats.
+  # Each historical bundle version is rendered under EVERY config set the target has used
+  # (current + its own history), because the target's bytes were rendered under whichever
+  # config was live at install time. Without that, flipping any config value makes every
+  # templated file read `diverged` at once.
   tmp="$STAGE/.render.$$"
+  raw="$STAGE/.raw.$$"
   DRIFT_CLASS="diverged"
   while IFS= read -r c; do
     [ -n "$c" ] || continue
-    git -C "$BUNDLE" cat-file blob "$c:$src" 2>/dev/null | render_stream > "$tmp" || continue
-    if cmp -s "$tmp" "$TARGET/$rel"; then DRIFT_CLASS="forward"; break; fi
+    git -C "$BUNDLE" cat-file blob "$c:$src" > "$raw" 2>/dev/null || continue
+    k=0
+    while [ "$k" -lt "$CFG_COUNT" ]; do
+      render_stream "$k" < "$raw" > "$tmp"
+      if cmp -s "$tmp" "$TARGET/$rel"; then DRIFT_CLASS="forward"; break; fi
+      k=$((k + 1))
+    done
+    [ "$DRIFT_CLASS" = "forward" ] && break
   done < <(path_commits "$BUNDLE" "$src")
-  rm -f "$tmp"
+  rm -f "$tmp" "$raw"
   return 0
 }
 
 # ---------- pass 1: classify everything, write nothing ----------
-declare -a ACTION DSTS MODES SRCS
+declare -a ACTION DSTS MODES
 i=0
 for entry in "${MANIFEST[@]}"; do
   IFS='|' read -r src dst mode <<<"$entry"
   staged="$STAGE/$i"
   target_file="$TARGET/$dst"
-  SRCS[$i]="$src"; DSTS[$i]="$dst"; MODES[$i]="$mode"
+  DSTS[$i]="$dst"; MODES[$i]="$mode"
   if [ ! -f "$target_file" ]; then
     ACTION[$i]="install"
   elif cmp -s "$staged" "$target_file"; then

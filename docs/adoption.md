@@ -87,10 +87,20 @@ commit) and which *any* config change defeats for every templated file at once. 
 in the original incident were templated. So each historical bundle version is now **rendered through
 the same substitution** and compared against the target's bytes.
 
+**Changing a config value is not drift, and is not treated as such.** A templated target file holds
+bytes rendered from whatever the config said *at install time*, so comparing only against today's
+values would make every templated file stop matching the moment anyone flips a documented knob —
+reporting `diverged` for all of them at once, with a remedy ("port the target's changes up") that
+cannot be acted on because there is nothing to port. The target's own history carries the configs it
+was rendered under, so historical bundle versions are rendered under **each** of them (current plus
+up to 50 historical, deduplicated).
+
 **The limits that remain, stated plainly:** divergence detection needs the bundle to be a git
 checkout — from an unpacked tarball it degrades to `unknown` (overwrite + a counted WARN), never to a
 silent `forward`. History scans are bounded at 1000 commits per path and use `--full-history`, so
-merge simplification cannot prune the commit that would have proven the direction.
+merge simplification cannot prune the commit that would have proven the direction. A config value
+that was changed *without* being committed to the target is not recoverable from history, so a
+templated file rendered under it reads as `diverged`.
 
 **A refusal is atomic.** If any file is refused, *nothing* is installed — not even the files that
 would have been fine — so a blocked run can never leave the target half-updated. Anything overwritten
