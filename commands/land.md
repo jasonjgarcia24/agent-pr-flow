@@ -15,8 +15,16 @@ Run the merge funnel for PR **$ARGUMENTS**:
      work around a stale/missing verdict.
 3. On success, run the close-out the script prints:
    - Fire **Radar** as a background agent to verify the Linear issue reached **Done**
-     (the GitHub integration usually drives it off the `Fixes SAD-N` body; Radar's pass
+     (the GitHub integration usually drives it off the `Fixes {{ISSUE_KEY}}-N` body; Radar's pass
      is idempotent verification).
    - Walk the remaining close-out surfaces (todo snapshot line; R-ID iff a quality bar
      moved; ADR/spec-row iff architectural) per `.claude/references/pm/workflow.md` §7.
-   - Remove the branch's worktree if one exists (`git worktree remove <path>`).
+   - **Worktree ({{ISSUE_KEY}}-418):** if the branch has one, remove it via the same split
+     `/prune-worktrees` uses — Radar confirms the {{ISSUE_KEY}}-N reached Done, then Hubert (with
+     explicit destructive-op authorization, quoting Radar's literal returned state) runs
+     `tools/dev/prune-worktrees.sh remove <path>`. Don't hand-run `git worktree remove`
+     here; this is the step that used to get silently skipped (see
+     `.claude/commands/prune-worktrees.md` for the full flow — it also catches anything
+     this misses). **You're almost always removing your OWN worktree here** — the script
+     refuses self-removal (cwd inside the target path), so run it from the primary
+     checkout or another worktree, not from the one being removed.

@@ -43,6 +43,7 @@
       ".claude/settings.json",
       ".claude/hooks/**",
       ".claude/commands/**",
+      ".claude/agents/**",
       ".githooks/**",
       "tools/dev/land-pr.sh",
       "tools/dev/setup-repo.sh",
