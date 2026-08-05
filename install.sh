@@ -308,7 +308,7 @@ add_config_set() { # $1 = path to a config json ("" = use the resolved VAL/HAVE)
       val=""; [ "${HAVE[$v]}" = "1" ] && val="${VAL[$v]}"
     else
       val="$(jq -r "${JQ_PATH[$v]} // empty" "$cfg" 2>/dev/null)" || val=""
-      [ -n "$val" ] || val="${DEFAULTS[$v]:-}"
+      [ -n "$val" ] || { [ -n "${DEFAULTS[$v]+set}" ] && val="${DEFAULTS[$v]}"; }
     fi
     CFGVAL[$CFG_COUNT,$v]="$val"
   done

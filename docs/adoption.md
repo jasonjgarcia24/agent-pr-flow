@@ -64,7 +64,7 @@ direction the drift runs:
 | `ahead` | the bundle's content is **already in the target's history** for that path — installing it would revert work | **REFUSED** |
 | `diverged` | **neither** side's content is in the other's history — both moved on independently | **REFUSED** |
 | `dirty` | the target file has uncommitted changes (recoverable from nothing) | **REFUSED** |
-| `unknown` | no target git repo, or the path was never committed | overwritten, with a loud `WARN` |
+| `unknown` | no target git repo, no **bundle** git, or the path was never committed | overwritten, **counted, and reported in the final summary** |
 
 A refusal exits non-zero and changes nothing. **The fix for `ahead` and `diverged` is to port the
 target's version up to the bundle**, then re-install — that is the direction the bundle-ownership

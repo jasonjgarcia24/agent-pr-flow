@@ -60,6 +60,7 @@ run_install() { # <target> [extra args...] -> stdout+stderr in $OUT, status in $
 # ---------------------------------------------------------------- case 1: the SAD-548 bug
 # Target has the bundle's OLD content in its history, then moved ahead. --force must refuse.
 t="$TMPROOT/ahead"; new_target "$t"
+AHEAD_T="$t"        # pinned: case 2 asserts against THIS target, not "whatever $t is"
 mkdir -p "$t/.claude/commands"
 cp "$ROOT/$BUNDLE_SRC" "$t/$TARGET_REL"                 # the bundle's current content...
 git -C "$t" add -A && git -C "$t" commit -qm "install bundle version"
@@ -78,8 +79,9 @@ else
 fi
 
 # ------------------------------------------------------- case 2: --clobber-local override
-run_install "$t" --force --clobber-local
-if grep -q "^CLOBBER" <<<"$OUT" && ! grep -q "local work done in the target" "$t/$TARGET_REL"; then
+run_install "$AHEAD_T" --force --clobber-local
+if grep -qE "^CLOBBER .*$REL_RE" <<<"$OUT" \
+   && ! grep -q "local work done in the target" "$AHEAD_T/$TARGET_REL"; then
   ok "ahead: --clobber-local overrides the refusal and discards local content"
 else
   bad "ahead: --clobber-local should overwrite" "rc=$RC"
@@ -93,6 +95,12 @@ fi
 # normal edit-upstream-then-reinstall workflow.
 FWD_BUNDLE="$TMPROOT/bundle-fwd"
 git clone -q "$ROOT" "$FWD_BUNDLE"
+# A clone resolves to HEAD, so without this the case would exercise the last COMMITTED
+# installer and never the working-tree one under test — and ADR-0031's edit-here-then-
+# reinstall flow means the tree is dirty exactly when this guard matters. The bundle
+# CONTENT must still come from history (that is what makes the fast-forward genuine);
+# only the installer is overridden.
+cp "$ROOT/install.sh" "$FWD_BUNDLE/install.sh"
 git -C "$FWD_BUNDLE" config user.email t@t.t
 git -C "$FWD_BUNDLE" config user.name t
 t="$TMPROOT/forward"; new_target "$t"
@@ -201,10 +209,14 @@ jq '.review.codeTierPolicy = "ci-only"' "$t/.claude/workflow.config.json" > "$t/
   && mv "$t/.cfg.tmp" "$t/.claude/workflow.config.json"
 git -C "$t" add -A && git -C "$t" commit -qm "flip review.codeTierPolicy to ci-only"
 run_install "$t" --force
-if grep -q "^DIVERGED" <<<"$OUT"; then
-  bad "config-flip: a supported config change was misreported as DIVERGED" "rc=$RC"
-else
+# Positive assertions as well as the negative one: a `! grep DIVERGED` alone is satisfied
+# by an installer that prints nothing at all, so require a clean exit AND evidence the
+# re-render actually happened.
+if ! grep -q "^DIVERGED" <<<"$OUT" && [ "$RC" -eq 0 ] \
+   && grep -q 'ci-only' "$t/.claude/references/pm/workflow.md"; then
   ok "config-flip: changing a config value re-renders cleanly instead of reading as drift"
+else
+  bad "config-flip: a supported config change must re-render, not report drift" "rc=$RC"
 fi
 
 # ---------------------------------------------------------- case 5d: refusal is ATOMIC
