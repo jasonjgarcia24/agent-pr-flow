@@ -98,7 +98,7 @@ ci-only` — this instance's setting, see below)* · security = CI + Watson + Ba
 the residual **code** tier land on green CI alone, with reviews at the owning agent's judgment
 (request the reviewer for large or risky diffs). Scoped strictly to tier=code — **docs** and
 **security** semantics are unchanged, and security ALWAYS requires both markers. Fail-closed:
-absent → `reviewer`; an unknown value aborts the landing. **This instance is set to `ci-only`**
+absent → `reviewer`; an unknown value aborts the landing. **This instance is set to `{{CODE_TIER_POLICY}}`**
 (ADR-0050, Jason 2026-08-05).
 
 **Verdict-comment convention** (what land-pr.sh reads): one PR issue-comment per verdict —

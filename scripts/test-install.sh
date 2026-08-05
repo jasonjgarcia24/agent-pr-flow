@@ -130,7 +130,7 @@ t="$TMPROOT/unknown"; new_target "$t"
 mkdir -p "$t/.claude/commands"
 printf 'untracked content\n' > "$t/$TARGET_REL"          # never committed
 run_install "$t" --force
-if grep -q "WARN: unverifiable" <<<"$OUT" && cmp -s "$ROOT/$BUNDLE_SRC" "$t/$TARGET_REL"; then
+if grep -qi "WARN: UNVERIFIABLE" <<<"$OUT" && cmp -s "$ROOT/$BUNDLE_SRC" "$t/$TARGET_REL"; then
   ok "unknown: untracked target file is overwritten but WARNs that it is unverifiable"
 else
   bad "unknown: expected an unverifiable WARN and an overwrite" "rc=$RC"
@@ -149,6 +149,51 @@ if grep -q "^DIVERGED .*$REL" <<<"$OUT" && [ "$RC" -ne 0 ] && grep -q "work only
   ok "diverged: --force REFUSES when neither side's content is in the other's history"
 else
   bad "diverged: --force must refuse a non-fast-forward" "rc=$RC"
+fi
+
+# --------------------------------------------------- case 5c: TEMPLATED source, diverged
+# Regression for a reproduced FAIL OPEN. Templated sources store {{VAR}} in bundle history
+# while the target stores RENDERED bytes, so blob OIDs can never match. An earlier cut
+# skipped the fast-forward confirmation for them entirely and let `forward` stand —
+# clobbering local work with exit 0 and an indistinguishable-from-clean `overwrite` line.
+#
+# The `ahead` check does NOT cover this: it needs today's render to exist verbatim as a
+# past commit, which a squash-merge repo (install + local edit in ONE commit) defeats, as
+# does any config change. This is the exact shape of two of the five files in the original
+# incident, so it gets its own case.
+TPL_SRC="references/workflow.md.tmpl"
+TPL_REL=".claude/references/pm/workflow.md"
+TPL_RE="$(printf '%s' "$TPL_REL" | sed 's/[].[^$*\\]/\\&/g')"
+t="$TMPROOT/templated"; new_target "$t"
+mkdir -p "$t/.claude/references/pm"
+# Render the bundle's template the way install.sh would, then append local work — and
+# commit BOTH in one commit, so the pristine render is nowhere in history.
+ISSUE_KEY=$(jq -r '.tracker.issueKey' "$t/.claude/workflow.config.json")
+DEFAULT_BRANCH=$(jq -r '.git.defaultBranch' "$t/.claude/workflow.config.json")
+sed -e "s/{{ISSUE_KEY}}/$ISSUE_KEY/g" -e "s/{{DEFAULT_BRANCH}}/$DEFAULT_BRANCH/g" \
+    -e "s/{{TEAM}}/T/g" -e "s/{{PROJECT}}/P/g" -e "s/{{MCP_PREFIX}}/mcp__x__/g" \
+    -e "s/{{REQUIRED_CHECK}}/C/g" "$ROOT/$TPL_SRC" > "$t/$TPL_REL"
+printf '\nlocal section added in the target, never ported up\n' >> "$t/$TPL_REL"
+git -C "$t" add -A && git -C "$t" commit -qm "install + local edit in one squash commit"
+run_install "$t" --force
+if grep -qE "^(DIVERGED|AHEAD|DIRTY) +$TPL_RE" <<<"$OUT" && [ "$RC" -ne 0 ] \
+   && grep -q "local section added in the target" "$t/$TPL_REL"; then
+  ok "templated: a TEMPLATED source is drift-checked too (post-render), not waved through"
+else
+  bad "templated: FAIL OPEN — templated source clobbered local work" "rc=$RC"
+fi
+
+# ---------------------------------------------------------- case 5d: refusal is ATOMIC
+# A refused run must leave the target completely untouched — not "all the files except the
+# refused ones". The docs claim "a refusal exits non-zero and changes nothing", and a
+# partially-updated target after a failed run is its own trap.
+before="$(git -C "$t" status --porcelain | sort)"
+run_install "$t" --force
+after="$(git -C "$t" status --porcelain | sort)"
+if [ "$before" = "$after" ] && [ "$RC" -ne 0 ] && grep -q "nothing was installed" <<<"$OUT"; then
+  ok "atomic: a refused run writes NOTHING — not even the files that would have been fine"
+else
+  bad "atomic: refused run modified the target" "rc=$RC"
 fi
 
 # ------------------------------------------------- case 6: no --force is still non-destructive
@@ -181,7 +226,7 @@ jq -n '{tracker:{platform:"linear",mcpPrefix:"mcp__x__",team:"T",project:"P",iss
         git:{defaultBranch:"main"},ci:{requiredCheck:"C"}}' > "$t/.claude/workflow.config.json"
 printf 'content in a non-git target\n' > "$t/$TARGET_REL"
 run_install "$t" --force
-if grep -q "WARN: unverifiable" <<<"$OUT"; then
+if grep -qi "WARN: UNVERIFIABLE" <<<"$OUT"; then
   ok "non-git target: classification degrades to a WARN instead of failing"
 else
   bad "non-git target: expected an unverifiable WARN" "rc=$RC"

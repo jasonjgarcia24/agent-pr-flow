@@ -31,7 +31,8 @@
 # --force is NOT a blind overwrite (SAD-548). Before replacing a differing file it
 # asks the TARGET repo's git history which direction the drift runs, and refuses to
 # install a file the target is already ahead of — that is a revert wearing an
-# update's clothing. See classify_drift() for the four classes and the rationale.
+# update's clothing. See classify_drift() for the five classes and the rationale.
+# A refusal is ATOMIC: nothing at all is installed, not even the unaffected files.
 #
 # CARVE-OUT: .claude/settings.json is a jq MERGE, not a copy, and is deliberately NOT
 # drift-classified. The merge preserves every target-only key by construction, so the
@@ -94,6 +95,11 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$TARGET" ] || { echo "install.sh: --target is required" >&2; usage >&2; exit 1; }
+# --clobber-local only has meaning against a refusal, and refusals only happen under
+# --force. Silently inert flags are how people believe they overrode something.
+if [ "$CLOBBER" = "1" ] && [ "$FORCE" != "1" ]; then
+  echo "install.sh: WARN — --clobber-local does nothing without --force (differing files are kept regardless)" >&2
+fi
 [ -d "$TARGET" ] || { echo "install.sh: target '$TARGET' is not a directory" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "install.sh: jq is required" >&2; exit 1; }
 
@@ -111,7 +117,7 @@ if [ -n "$CONFIG" ]; then
 fi
 
 # Template variables and the config keys they come from.
-VAR_NAMES=(TEAM PROJECT ISSUE_KEY MCP_PREFIX DEFAULT_BRANCH REQUIRED_CHECK)
+VAR_NAMES=(TEAM PROJECT ISSUE_KEY MCP_PREFIX DEFAULT_BRANCH REQUIRED_CHECK CODE_TIER_POLICY)
 declare -A JQ_PATH=(
   [TEAM]='.tracker.team'
   [PROJECT]='.tracker.project'
@@ -119,6 +125,15 @@ declare -A JQ_PATH=(
   [MCP_PREFIX]='.tracker.mcpPrefix'
   [DEFAULT_BRANCH]='.git.defaultBranch'
   [REQUIRED_CHECK]='.ci.requiredCheck'
+  [CODE_TIER_POLICY]='.review.codeTierPolicy'
+)
+# Variables whose config key is OPTIONAL, with the same default the consuming code applies.
+# Without this, adding a template variable is a breaking change for every existing instance
+# whose config predates the key: the render fails and nothing installs. Anything listed here
+# MUST match the runtime default in the code that reads it, or the docs render a lie —
+# CODE_TIER_POLICY mirrors land-pr.sh's fail-closed `absent -> reviewer`.
+declare -A DEFAULTS=(
+  [CODE_TIER_POLICY]='reviewer'
 )
 declare -A VAL HAVE
 for v in "${VAR_NAMES[@]}"; do
@@ -130,6 +145,10 @@ for v in "${VAR_NAMES[@]}"; do
       VAL[$v]="$val"
       HAVE[$v]=1
     fi
+  fi
+  if [ "${HAVE[$v]}" = "0" ] && [ -n "${DEFAULTS[$v]:-}" ]; then
+    VAL[$v]="${DEFAULTS[$v]}"
+    HAVE[$v]=1
   fi
 done
 
@@ -208,57 +227,84 @@ if [ -n "$missing" ]; then
   exit 1
 fi
 
-# ---------- phase 2: install ----------
-blocked=0
-ahead=0
+# ---------- phase 2: classify, then install ----------
+blocked=0        # differ, no --force  (target KEPT, legacy behaviour)
+refused=0        # ahead | diverged | dirty  (REFUSED even under --force)
+unverifiable=0   # overwritten but the direction could not be proven
 
-# ---------- drift classification (SAD-548) ----------
 # `--force` used to overwrite ANY differing target file. That silently reverted work
 # which had been done in the target and never ported up to the bundle: the bundle copy
 # was OLDER, `--force` restored it, and the run still printed a clean summary. It happened
 # for real on 2026-07-30 across five files, and was caught only because a human read
 # `git status` before committing.
 #
-# The fix is to tell the two directions apart before overwriting:
+# So the DIRECTION of the drift is decided before anything is overwritten:
 #
-#   forward — the bundle content is genuinely NEW. Overwriting is a fast-forward.
-#   ahead   — the bundle content is something the TARGET has already moved past. The
-#             target's own git history contains this exact content for this exact path,
-#             so installing it is a REVERT, not an update.
-#   dirty   — the target file has uncommitted changes. Overwriting destroys work that
-#             exists nowhere else.
-#   unknown — no target git repo, or the path was never committed. Can't tell.
+#   forward     the TARGET's content is in the BUNDLE's history -> the bundle really did
+#               move on from it. A fast-forward. Overwrite.
+#   ahead       the bundle's content is already in the TARGET's history for that path ->
+#               installing it is a REVERT, not an update. REFUSED.
+#   diverged    neither side's content is in the other's history -> both moved on
+#               independently, so overwriting drops the target's half. REFUSED.
+#   dirty       the target file has uncommitted changes -> that work exists nowhere
+#               else. REFUSED.
+#   unknown     no target git repo, or the path was never committed -> undecidable.
+#               Overwritten, but counted and reported.
 #
-# The signal is the target repo's own history, so this needs no state file, no receipt,
-# and no bootstrap step — it works in a fresh clone or worktree on the first run.
+# Note both directions are checked. "The bundle's content is not in the target's history"
+# alone proves nothing: that is equally true of a fast-forward and of a divergence, and an
+# earlier cut of this guard inferred `forward` from it and clobbered a genuinely diverged
+# tools/dev/land-pr.sh.
 #
-# NOTE: this is deliberately checked against the STAGED (rendered) content, not the raw
-# bundle file, because rendered content is what was installed and therefore what the
-# target's history recorded.
+# The signal is the two repos' own histories, so this needs no state file, no receipt and
+# no bootstrap step -- it works on the first run in a fresh clone or worktree.
+
 HAVE_BUNDLE_GIT=0
 git -C "$BUNDLE" rev-parse --git-dir >/dev/null 2>&1 && HAVE_BUNDLE_GIT=1
 
+# Apply the config substitution to stdin, byte-for-byte the way phase 1 renders a staged
+# file (including the trailing-newline normalisation of $(cat) + printf '%s\n'). Historical
+# bundle blobs MUST go through this before being compared with target bytes: bundle history
+# stores {{VAR}}, the target stores rendered values, so raw blobs can never match.
+render_stream() {
+  local content v pat
+  content="$(cat)"
+  for v in "${VAR_NAMES[@]}"; do
+    [ "${HAVE[$v]}" = "1" ] || continue
+    pat="{{${v}}}"
+    content="${content//"$pat"/"${VAL[$v]}"}"
+  done
+  printf '%s\n' "$content"
+}
+
+# Every commit that touched a path, on all refs. --full-history so merge simplification
+# cannot prune a commit whose blob is the one that would have proven the direction.
+path_commits() { # $1 = repo, $2 = path
+  git -C "$1" rev-list --full-history --max-count=1000 --all -- "$2" 2>/dev/null
+}
+
 DRIFT_CLASS=""
-classify_drift() { # $1 = staged abs, $2 = target-relative, $3 = bundle-relative src -> $DRIFT_CLASS
-  local staged="$1" rel="$2" src="$3" want st have
+classify_drift() { # $1 = staged abs, $2 = target-relative, $3 = bundle-relative src
+  local staged="$1" rel="$2" src="$3" want st have c tmp templated=0
   DRIFT_CLASS="unknown"
   git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1 || return 0
 
-  # Uncommitted local work outranks everything: it is not recoverable from history.
-  st="$(git -C "$TARGET" status --porcelain -- "$rel" 2>/dev/null)"
+  # Uncommitted local work outranks everything: it is recoverable from nothing.
+  # --literal-pathspecs is a MAIN-command option and must precede the subcommand; placing
+  # it after `status` makes git reject it, and with stderr discarded the check silently
+  # returns empty — i.e. every dirty file would be misclassified. It is here so a manifest
+  # path containing glob metacharacters is matched literally rather than as a pathspec.
+  st="$(git -C "$TARGET" --literal-pathspecs status --porcelain -- "$rel" 2>/dev/null)"
   case "$st" in
-    '??'*) DRIFT_CLASS="unknown"; return 0 ;;   # untracked — nothing to compare against
+    '??'*) DRIFT_CLASS="unknown"; return 0 ;;   # untracked -- nothing to compare against
     ?*)    DRIFT_CLASS="dirty";   return 0 ;;
   esac
 
-  # --path applies the target's .gitattributes filters, so the OID is computed the same
-  # way git would have computed it when the content was committed.
-  want="$(git -C "$TARGET" hash-object --path "$rel" -- "$staged" 2>/dev/null)" || return 0
-  [ -n "$want" ] || return 0
-
-  # Every commit that touched this path, newest first; --max-count bounds a pathological
-  # history. If the staged blob appears at ANY of them, the bundle is behind the target.
-  if git -C "$TARGET" rev-list --max-count=1000 --all -- "$rel" 2>/dev/null \
+  # --- AHEAD: is the content we are about to install already in the target's past? ---
+  # --path applies the target's .gitattributes, so the OID is computed the way git would
+  # have computed it when that content was committed.
+  want="$(git -C "$TARGET" hash-object --path "$rel" -- "$staged" 2>/dev/null)" || want=""
+  if [ -n "$want" ] && path_commits "$TARGET" "$rel" \
        | sed "s|\$|:$rel|" \
        | git -C "$TARGET" cat-file --batch-check='%(objectname)' 2>/dev/null \
        | grep -qxF "$want"; then
@@ -266,105 +312,147 @@ classify_drift() { # $1 = staged abs, $2 = target-relative, $3 = bundle-relative
     return 0
   fi
 
-  # The staged blob is not in the target's history. That alone does NOT prove the bundle
-  # is newer — both sides may carry unique work, in which case overwriting still drops
-  # whatever the target had. Confirm a fast-forward POSITIVELY: does the target's current
-  # content appear in the BUNDLE's history for the source path?
-  #
-  #   yes -> the bundle has genuinely moved on from what the target holds. Fast-forward.
-  #   no  -> neither side's content is in the other's history. DIVERGED, not an update.
-  #
-  # This is not hypothetical: caught in the reference instance on tools/dev/land-pr.sh,
-  # where target and bundle each carried fixes the other had never seen, and the
-  # one-directional check above happily called it `forward`.
-  #
-  # LIMITATION, deliberate: only decidable for sources the renderer does not touch. A
-  # templated source stores {{VAR}} in bundle history while the target stores rendered
-  # bytes, so the two can never match and the question is unanswerable — templated files
-  # fall through to `forward` rather than crying wolf on every legitimate bundle edit.
-  # The `ahead` check above still covers them, and it is the one that catches a revert.
-  if [ -n "$(git -C "$TARGET" rev-list --max-count=1 --all -- "$rel" 2>/dev/null)" ]; then
-    DRIFT_CLASS="forward"
-    if [ "$HAVE_BUNDLE_GIT" = "1" ] && ! grep -qE '\{\{[A-Z_]+\}\}' "$BUNDLE/$src" 2>/dev/null; then
-      have="$(git -C "$BUNDLE" hash-object --path "$src" -- "$TARGET/$rel" 2>/dev/null)" || have=""
-      if [ -n "$have" ] \
-         && ! git -C "$BUNDLE" rev-list --max-count=1000 --all -- "$src" 2>/dev/null \
-              | sed "s|\$|:$src|" \
-              | git -C "$BUNDLE" cat-file --batch-check='%(objectname)' 2>/dev/null \
-              | grep -qxF "$have"; then
-        DRIFT_CLASS="diverged"
-      fi
-    fi
+  # No target history for this path at all -> undecidable, not a fast-forward.
+  [ -n "$(path_commits "$TARGET" "$rel" | head -1)" ] || return 0
+
+  # --- FORWARD vs DIVERGED: confirm the fast-forward POSITIVELY, from bundle history. ---
+  if [ "$HAVE_BUNDLE_GIT" != "1" ]; then
+    DRIFT_CLASS="unknown"            # cannot prove it; do not claim `forward`
+    return 0
   fi
+  grep -qE '\{\{[A-Z_]+\}\}' "$BUNDLE/$src" 2>/dev/null && templated=1
+
+  if [ "$templated" = "0" ]; then
+    have="$(git -C "$BUNDLE" hash-object --path "$src" -- "$TARGET/$rel" 2>/dev/null)" || have=""
+    if [ -n "$have" ] && path_commits "$BUNDLE" "$src" \
+         | sed "s|\$|:$src|" \
+         | git -C "$BUNDLE" cat-file --batch-check='%(objectname)' 2>/dev/null \
+         | grep -qxF "$have"; then
+      DRIFT_CLASS="forward"
+    else
+      DRIFT_CLASS="diverged"
+    fi
+    return 0
+  fi
+
+  # Templated source: bundle history holds {{VAR}} while the target holds rendered bytes,
+  # so blob OIDs can never match. RENDER each historical version through the same
+  # substitution and compare the result. Skipping this check instead (an earlier cut did)
+  # is a fail-open on exactly the reference-instance files that drifted in the original
+  # incident -- and the `ahead` check does NOT cover them, because it needs today's render
+  # to exist verbatim as a past commit, which a squash-merge repo or any config change
+  # defeats.
+  tmp="$STAGE/.render.$$"
+  DRIFT_CLASS="diverged"
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    git -C "$BUNDLE" cat-file blob "$c:$src" 2>/dev/null | render_stream > "$tmp" || continue
+    if cmp -s "$tmp" "$TARGET/$rel"; then DRIFT_CLASS="forward"; break; fi
+  done < <(path_commits "$BUNDLE" "$src")
+  rm -f "$tmp"
   return 0
 }
-install_file() { # $1 = staged abs path, $2 = target-relative dst, $3 = mode (x|-), $4 = bundle src
-  local staged="$1" rel="$2" mode="$3" src="$4"
-  local dst="$TARGET/$rel"
-  mkdir -p "$(dirname "$dst")"
-  if [ ! -f "$dst" ]; then
-    cp "$staged" "$dst"
-    if [ "$mode" = "x" ]; then chmod +x "$dst"; fi
-    echo "install             $rel"
-  elif cmp -s "$staged" "$dst"; then
-    if [ "$mode" = "x" ]; then chmod +x "$dst"; fi
-    echo "skip (unchanged)    $rel"
-  elif [ "$FORCE" = "1" ]; then
-    classify_drift "$staged" "$rel" "$src"
-    case "$DRIFT_CLASS" in
-      ahead|dirty|diverged)
-        if [ "$CLOBBER" = "1" ]; then
-          cp "$staged" "$dst"
-          if [ "$mode" = "x" ]; then chmod +x "$dst"; fi
-          echo "CLOBBER (--clobber-local) $rel — target was $DRIFT_CLASS; local content DISCARDED"
-        else
-          if [ "$DRIFT_CLASS" = "ahead" ]; then
-            echo "AHEAD               $rel — target is AHEAD of the bundle; REFUSING to overwrite even with --force:"
-            echo "    the bundle's content for this file already exists in the target's git history —"
-            echo "    installing it would REVERT work the target has since moved past."
-            echo "    Fix: port the target's version UP to the bundle, then re-install (ADR-0031)."
-          elif [ "$DRIFT_CLASS" = "diverged" ]; then
-            echo "DIVERGED            $rel — target and bundle have each moved on; REFUSING to overwrite even with --force:"
-            echo "    neither side's content appears in the other's history, so this is not a"
-            echo "    fast-forward — the target carries work the bundle has never seen."
-            echo "    Fix: reconcile the two (port the target's changes up), then re-install."
-          else
-            echo "DIRTY               $rel — target has UNCOMMITTED changes; REFUSING to overwrite even with --force:"
-            echo "    that work exists nowhere else. Commit or stash it first."
-          fi
-          echo "    Override (DISCARDS the target's version): --force --clobber-local"
-          diff -u --label "$rel (target)" --label "$rel (bundle)" "$dst" "$staged" | sed 's/^/    /'
-          ahead=$((ahead + 1))
-        fi
-        ;;
-      unknown)
-        cp "$staged" "$dst"
-        if [ "$mode" = "x" ]; then chmod +x "$dst"; fi
-        echo "overwrite (--force) $rel  ** WARN: unverifiable — no target git history for this path;"
-        echo "    could not prove the bundle is not older than the target. Commit the target's files"
-        echo "    so a future install can tell a fast-forward from a revert."
-        ;;
-      *)
-        cp "$staged" "$dst"
-        if [ "$mode" = "x" ]; then chmod +x "$dst"; fi
-        echo "overwrite (--force) $rel"
-        ;;
-    esac
-  else
-    echo "DIFFERS             $rel — target KEPT (re-run with --force to overwrite):"
-    diff -u --label "$rel (target)" --label "$rel (bundle)" "$dst" "$staged" | sed 's/^/    /'
-    blocked=$((blocked + 1))
-  fi
-}
 
-echo "== installing into $TARGET =="
+# ---------- pass 1: classify everything, write nothing ----------
+declare -a ACTION DSTS MODES SRCS
 i=0
 for entry in "${MANIFEST[@]}"; do
   IFS='|' read -r src dst mode <<<"$entry"
-  install_file "$STAGE/$i" "$dst" "$mode" "$src"
+  staged="$STAGE/$i"
+  target_file="$TARGET/$dst"
+  SRCS[$i]="$src"; DSTS[$i]="$dst"; MODES[$i]="$mode"
+  if [ ! -f "$target_file" ]; then
+    ACTION[$i]="install"
+  elif cmp -s "$staged" "$target_file"; then
+    ACTION[$i]="skip"
+  elif [ "$FORCE" != "1" ]; then
+    ACTION[$i]="differs"; blocked=$((blocked + 1))
+  else
+    classify_drift "$staged" "$dst" "$src"
+    case "$DRIFT_CLASS" in
+      ahead|diverged|dirty)
+        if [ "$CLOBBER" = "1" ]; then ACTION[$i]="clobber:$DRIFT_CLASS"
+        else ACTION[$i]="refuse:$DRIFT_CLASS"; refused=$((refused + 1)); fi ;;
+      unknown) ACTION[$i]="unverifiable"; unverifiable=$((unverifiable + 1)) ;;
+      *)       ACTION[$i]="overwrite" ;;
+    esac
+  fi
   i=$((i + 1))
 done
 
+# A refusal is ATOMIC: report every one of them and write NOTHING, so a blocked run can
+# never leave the target half-updated. Mirrors the "nothing is written on a render
+# failure" rule in phase 1.
+if [ "$refused" -gt 0 ]; then
+  echo "== REFUSED — nothing was installed into $TARGET =="
+  i=0
+  for entry in "${MANIFEST[@]}"; do
+    case "${ACTION[$i]}" in
+      refuse:ahead)
+        echo "AHEAD               ${DSTS[$i]} — target is AHEAD of the bundle:"
+        echo "    the bundle's content for this file already exists in the target's git history —"
+        echo "    installing it would REVERT work the target has since moved past."
+        echo "    Fix: port the target's version UP to the bundle, then re-install (ADR-0031)." ;;
+      refuse:diverged)
+        echo "DIVERGED            ${DSTS[$i]} — target and bundle have each moved on:"
+        echo "    neither side's content appears in the other's history, so this is not a"
+        echo "    fast-forward — the target carries work the bundle has never seen."
+        echo "    Fix: reconcile the two (port the target's changes up), then re-install." ;;
+      refuse:dirty)
+        echo "DIRTY               ${DSTS[$i]} — target has UNCOMMITTED changes:"
+        echo "    that work exists nowhere else. Commit or stash it first." ;;
+      *) i=$((i + 1)); continue ;;
+    esac
+    diff -u --label "${DSTS[$i]} (target)" --label "${DSTS[$i]} (bundle)" \
+      "$TARGET/${DSTS[$i]}" "$STAGE/$i" | sed 's/^/    /'
+    i=$((i + 1))
+  done
+  {
+    echo ""
+    echo "install.sh: REFUSED — $refused file(s) are AHEAD of, or DIVERGED from, the bundle"
+    echo "  (or carry uncommitted changes). Overwriting them would drop work that is not in"
+    echo "  the bundle, so NOTHING was installed — not even the files that would have been"
+    echo "  fine. Port the target's version UP to the bundle (ADR-0031) and re-install;"
+    echo "  --force --clobber-local overrides only if you intend to DISCARD it."
+  } >&2
+  exit 1
+fi
+
+# ---------- pass 2: write ----------
+echo "== installing into $TARGET =="
+apply_file() { # $1 = index
+  local i="$1" rel="${DSTS[$1]}" mode="${MODES[$1]}" staged="$STAGE/$1"
+  local dst="$TARGET/$rel"
+  mkdir -p "$(dirname "$dst")"
+  case "${ACTION[$i]}" in
+    install)
+      cp "$staged" "$dst"; [ "$mode" = "x" ] && chmod +x "$dst"
+      echo "install             $rel" ;;
+    skip)
+      [ "$mode" = "x" ] && chmod +x "$dst"
+      echo "skip (unchanged)    $rel" ;;
+    overwrite)
+      cp "$staged" "$dst"; [ "$mode" = "x" ] && chmod +x "$dst"
+      echo "overwrite (--force) $rel" ;;
+    unverifiable)
+      cp "$staged" "$dst"; [ "$mode" = "x" ] && chmod +x "$dst"
+      echo "overwrite (--force) $rel  ** WARN: UNVERIFIABLE — could not prove the bundle is"
+      echo "    not older than the target (no target history for this path, or no bundle git)."
+      echo "    Commit the target's files so a future install can tell an update from a revert." ;;
+    clobber:*)
+      cp "$staged" "$dst"; [ "$mode" = "x" ] && chmod +x "$dst"
+      echo "CLOBBER (--clobber-local) $rel — target was ${ACTION[$i]#clobber:}; local content DISCARDED" ;;
+    differs)
+      echo "DIFFERS             $rel — target KEPT (re-run with --force to overwrite):"
+      diff -u --label "$rel (target)" --label "$rel (bundle)" "$dst" "$staged" | sed 's/^/    /' ;;
+  esac
+  return 0
+}
+i=0
+for entry in "${MANIFEST[@]}"; do
+  apply_file "$i"
+  i=$((i + 1))
+done
 # ---------- settings.fragment.json -> .claude/settings.json (jq merge) ----------
 frag="$BUNDLE/settings.fragment.json"
 settings="$TARGET/.claude/settings.json"
@@ -419,15 +507,16 @@ else
 fi
 
 echo ""
-if [ "$ahead" -gt 0 ]; then
+# An inline WARN scrolls off in a 15-file run, and "it printed a clean summary" is the
+# whole SAD-548 story — so anything unproven has to survive to the summary.
+if [ "$unverifiable" -gt 0 ]; then
   {
-    echo "install.sh: REFUSED — $ahead file(s) are AHEAD of, or DIVERGED from, the bundle (or carry"
-    echo "  uncommitted changes). Overwriting them would drop work that is not in the bundle, so"
-    echo "  nothing about those files was changed. The fix is to port the target's version UP to"
-    echo "  the bundle (ADR-0031) and re-install; --force --clobber-local overrides only if you"
-    echo "  intend to DISCARD it."
+    echo "install.sh: WARN — $unverifiable file(s) were overwritten WITHOUT being able to prove the"
+    echo "  bundle is newer than the target (no target git history for the path, or the bundle is"
+    echo "  not a git checkout). If any of them carried local work, it is now only in your"
+    echo "  reflog/backups. Commit the target's files so the next install can tell an update"
+    echo "  from a revert."
   } >&2
-  exit 1
 fi
 if [ "$blocked" -gt 0 ]; then
   echo "install.sh: $blocked file(s) differ from the bundle and were KEPT — re-run with --force to overwrite" >&2

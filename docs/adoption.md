@@ -30,7 +30,7 @@ bash install.sh --target /path/to/your-repo --config your-workflow.config.json [
 2. **Renders** `{{VAR}}` placeholders from the config in the files that carry them. Every missing
    config key is collected and the run **fails listing them all** — nothing is written on a render
    failure. Variables: `{{TEAM}}` `{{PROJECT}}` `{{ISSUE_KEY}}` `{{MCP_PREFIX}}` `{{DEFAULT_BRANCH}}`
-   `{{REQUIRED_CHECK}}`.
+   `{{REQUIRED_CHECK}}` `{{CODE_TIER_POLICY}}`.
 3. **Merges** `settings.fragment.json` into the target's `.claude/settings.json` (`jq -s '.[0] * .[1]'`
    — the fragment's hook wiring wins on conflicts, every other key is preserved). `settings.local.json`
    is **never** touched.
@@ -77,12 +77,25 @@ still drops the target's half. So a fast-forward is confirmed *positively*, from
 rather than inferred from the absence of evidence. This was not hypothetical: the reference instance
 had exactly one such file (`tools/dev/land-pr.sh`), and a one-directional check called it safe.
 
-**Limitation, stated plainly:** `diverged` is only decidable for sources the renderer does not touch.
-A templated source stores `{{VAR}}` in bundle history while the target stores rendered bytes, so the
-two can never match and the question is unanswerable — templated files fall through to `forward`
-rather than crying wolf on every legitimate bundle edit. The `ahead` check still covers them, and
-that is the one that catches a revert. Divergence detection also needs the bundle to be a git
-checkout; from an unpacked tarball it degrades to `forward`.
+**Templated sources are checked too, and getting this wrong was a fail-open.** A templated source
+stores `{{VAR}}` in bundle history while the target stores *rendered* bytes, so raw blobs can never
+match. An earlier cut therefore skipped the check for them and let `forward` stand — which silently
+clobbered local work with exit 0 and an ordinary-looking `overwrite` line. The mitigation claimed at
+the time ("the `ahead` check still covers them") was **false**: `ahead` needs today's render to exist
+verbatim as a past commit, which a squash-merge repo defeats (install and local edit arrive in one
+commit) and which *any* config change defeats for every templated file at once. Two of the five files
+in the original incident were templated. So each historical bundle version is now **rendered through
+the same substitution** and compared against the target's bytes.
+
+**The limits that remain, stated plainly:** divergence detection needs the bundle to be a git
+checkout — from an unpacked tarball it degrades to `unknown` (overwrite + a counted WARN), never to a
+silent `forward`. History scans are bounded at 1000 commits per path and use `--full-history`, so
+merge simplification cannot prune the commit that would have proven the direction.
+
+**A refusal is atomic.** If any file is refused, *nothing* is installed — not even the files that
+would have been fine — so a blocked run can never leave the target half-updated. Anything overwritten
+without proof is counted and reported in the final summary, not just warned about inline where a
+15-file run would scroll it away.
 
 No state file, receipt, or bootstrap step is involved — the signal is the two repos' own histories, so
 this works on the first run in a fresh clone or worktree. Regression suite: `scripts/test-install.sh`.
