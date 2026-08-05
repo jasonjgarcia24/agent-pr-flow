@@ -84,6 +84,12 @@ lists below are the semantics, not a second copy):
 
 **Gate per tier:** docs = CI alone · code = CI + Watson · security = CI + Watson + Barb.
 
+**`review.codeTierPolicy`** (config, default `reviewer`): an instance may set `ci-only` to make
+the residual **code** tier land on green CI alone, with reviews at the owning agent's judgment
+(request the reviewer for large or risky diffs). Scoped strictly to tier=code — **docs** and
+**security** semantics are unchanged, and security ALWAYS requires both markers. Fail-closed:
+absent → `reviewer`; an unknown value aborts the landing.
+
 **Verdict-comment convention** (what land-pr.sh reads): one PR issue-comment per verdict —
 line 1 is the machine marker, then a human-readable summary:
 
