@@ -28,7 +28,7 @@ jobs:
     name: install · hooks · land-pr
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # test-install.sh's fast-forward case builds a genuine bundle history and asks
           # git which direction the drift runs; a shallow clone has no history to answer with.
