@@ -1,0 +1,112 @@
+name: Bundle tests
+
+# This repo ships the workflow machinery other repos install, but had no CI of its own:
+# test-install.sh / test-hooks.sh / test-land-pr.sh only ran when somebody remembered.
+# A suite that runs on human memory is a suite that has already stopped running.
+#
+# NOTE the two-stage shape. test-install.sh runs against the bundle repo, but test-hooks.sh
+# and test-land-pr.sh assert on the INSTALLED layout (.claude/hooks/*, tools/dev/*), so they
+# cannot run from here at all — they need a target that has been installed into. Doing that
+# install in CI is not just plumbing: it is the end-to-end proof that every artifact the
+# bundle's own docs and commands reference is actually in the MANIFEST.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suites:
+    name: install · hooks · land-pr
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # test-install.sh's fast-forward case builds a genuine bundle history and asks
+          # git which direction the drift runs; a shallow clone has no history to answer with.
+          fetch-depth: 0
+
+      - name: Tooling
+        run: |
+          bash --version | head -1
+          jq --version
+          git --version
+          # setup-repo.sh FAILs outright if gh is absent (it only WARNs when gh is present
+          # but unauthenticated, which is this runner's state). Assert it up front so a
+          # runner-image change reads as "gh missing", not as a mysterious install failure.
+          command -v gh >/dev/null || { echo "::error::gh is not on PATH"; exit 1; }
+
+      - name: Git identity
+        run: |
+          # Every suite builds throwaway repos and commits into them.
+          git config --global user.email "ci@agent-pr-flow.invalid"
+          git config --global user.name  "agent-pr-flow CI"
+
+      - name: Shell syntax
+        run: |
+          rc=0
+          while IFS= read -r f; do
+            bash -n "$f" || { echo "::error file=$f::bash -n failed"; rc=1; }
+          done < <(git ls-files '*.sh')
+          exit $rc
+
+      - name: ShellCheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          # Advisory for now: the tree has pre-existing style findings, and turning them
+          # into a hard gate belongs in its own pass, not silently inside a CI-enablement PR.
+          git ls-files '*.sh' | xargs shellcheck -S error || echo "::warning::shellcheck reported findings"
+
+      - name: test-install.sh — drift classification
+        run: bash scripts/test-install.sh
+
+      - name: Install the bundle into a scratch target
+        run: |
+          T="$RUNNER_TEMP/target"
+          mkdir -p "$T"
+          git -C "$T" init -q
+          bash install.sh --target "$T" --config templates/workflow.config.example.json
+          git -C "$T" add -A
+          git -C "$T" commit -qm "adopt the bundle"
+
+      - name: test-hooks.sh — in the installed target
+        working-directory: ${{ runner.temp }}/target
+        run: bash tools/dev/test-hooks.sh
+
+      - name: test-land-pr.sh — in the installed target
+        working-directory: ${{ runner.temp }}/target
+        run: bash tools/dev/test-land-pr.sh
+
+      - name: install.sh --check is inert and idempotent
+        run: |
+          # Re-installing over an identical target must classify everything as unchanged and
+          # exit 0. A non-zero here means the bundle does not round-trip through its own
+          # installer — e.g. a file that renders differently on the second pass.
+          bash install.sh --target "$RUNNER_TEMP/target" --check
+
+      - name: Close-out artifacts resolve in the installed target
+        working-directory: ${{ runner.temp }}/target
+        run: |
+          # The SAD-652 regression, asserted on the real installed tree rather than a
+          # fixture: /land's close-out tells the agent to run prune-worktrees.sh and NOT to
+          # hand-run `git worktree remove`. If the script is not installed, that step is a
+          # silent no-op for every adopter.
+          rc=0
+          for f in tools/dev/prune-worktrees.sh \
+                   .claude/commands/prune-worktrees.md \
+                   .claude/commands/laymans.md; do
+            [ -f "$f" ] || { echo "::error::$f referenced by the bundle but not installed"; rc=1; }
+          done
+          [ -x tools/dev/prune-worktrees.sh ] || { echo "::error::prune-worktrees.sh is not executable"; rc=1; }
+          # And it must actually run: "no worktrees to prune" is the steady state and has to
+          # exit 0, or every close-out reads a clean sweep as a failed one.
+          bash tools/dev/prune-worktrees.sh detect || { echo "::error::detect exited non-zero with nothing to prune"; rc=1; }
+          exit $rc

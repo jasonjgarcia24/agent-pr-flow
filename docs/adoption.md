@@ -20,6 +20,9 @@ check, and a Claude Code environment (the hooks are Claude Code `PreToolUse`/`Po
 
 ```bash
 bash install.sh --target /path/to/your-repo --config your-workflow.config.json [--force] [--clobber-local]
+
+# preview first — classifies the whole manifest, writes nothing, skips the doctor:
+bash install.sh --target /path/to/your-repo --config your-workflow.config.json --check
 ```
 
 `install.sh`:
@@ -178,15 +181,36 @@ a mis-configured one is loud rather than silently wrong.
 
 ## Verify
 
-Two committed regression suites (installed to `tools/dev/`):
+Three regression suites. **Two of them run from an INSTALLED repo, not from the bundle** — they
+assert on `.claude/hooks/*` and `tools/dev/*`, so run from a bundle clone they fail every case with
+"No such file or directory". Install into a scratch target first (that is also what the bundle's own
+CI does, and it doubles as proof the manifest is complete):
 
-- **`test-hooks.sh`** — feeds synthetic hook payloads to the safety hooks and asserts exit codes
-  across the D/F/W rules, quoting/prefix-normalization bypasses, refspec spellings, and the secret
-  patterns. No command in its table is ever executed. Run it after any hook edit.
-- **`test-land-pr.sh`** — drives the funnel's self-test mode over every tracked path plus an
-  adversarial near-miss set and asserts the config-driven and fallback tier classifiers agree
-  exactly, and that the self-protection paths resolve to the security tier. Run it after any change
-  to the tier patterns or the funnel's tier logic.
+- **`test-install.sh`** — runs from the **bundle repo** (`bash scripts/test-install.sh`). Drives
+  install.sh's drift classification: ahead / diverged / dirty / forward / unknown, the atomicity of a
+  refusal, `--dry-run`'s inertness, `review.codeTierPolicy` validation, and that every artifact the
+  shipped commands reference actually installs.
+- **`test-hooks.sh`** (installed to `tools/dev/`) — feeds synthetic hook payloads to the safety hooks
+  and asserts exit codes across the D/F/W rules, quoting/prefix-normalization bypasses, refspec
+  spellings, and the secret patterns. No command in its table is ever executed. Run it after any hook
+  edit.
+- **`test-land-pr.sh`** (installed to `tools/dev/`) — drives the funnel's self-test mode over every
+  tracked path plus a fixed adversarial near-miss set, and asserts the config-driven and fallback
+  tier classifiers agree exactly and that the self-protection paths resolve to the security tier. Run
+  it after any change to the tier patterns or the funnel's tier logic.
+
+```bash
+bash scripts/test-install.sh                       # from the bundle repo
+
+T=$(mktemp -d); git -C "$T" init -q                # then, for the other two:
+bash install.sh --target "$T" --config templates/workflow.config.example.json
+( cd "$T" && bash tools/dev/test-hooks.sh && bash tools/dev/test-land-pr.sh )
+```
+
+**Preview an install before running it:** `install.sh --target <repo> --check` classifies the whole
+manifest, prints what each entry would do, and writes nothing. Worth doing on any target that has
+been edited locally — because a refusal is atomic, one AHEAD file blocks the entire install, and
+`--check` is the only way to see all of them in one pass rather than one re-run at a time.
 
 A live smoke test is simply: from an agent session, run a raw `gh pr merge` (should be blocked by
 F1), a push to the trunk (blocked by F2 / pre-push), and a benign command (should pass) — the block
@@ -196,8 +220,10 @@ messages confirm the hooks are wired.
 
 No uninstaller ships; removal is the mirror image of install:
 
-1. Delete the installed files: `.claude/hooks/*.sh`, `.claude/commands/{land,issue,linear-triage}.md`,
-   `.claude/agents/radar.md`, `.claude/references/pm/{workflow,linear}.md`, `tools/dev/{land-pr,setup-repo,test-hooks,test-land-pr}.sh`,
+1. Delete the installed files: `.claude/hooks/*.sh`,
+   `.claude/commands/{land,issue,linear-triage,prune-worktrees,laymans}.md`,
+   `.claude/agents/radar.md`, `.claude/references/pm/{workflow,linear}.md`,
+   `tools/dev/{land-pr,prune-worktrees,setup-repo,test-hooks,test-land-pr}.sh`,
    `.githooks/pre-push`, `.github/workflows/main-guard.yml`, `.claude/workflow.config.json`.
 2. Remove the bundle's keys from `.claude/settings.json` (the hook wiring under
    `hooks.PreToolUse`/`hooks.PostToolUse`, and `enabledMcpjsonServers` if the fragment added it).

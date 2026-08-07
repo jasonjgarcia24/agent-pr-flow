@@ -101,6 +101,18 @@ git clone -q "$ROOT" "$FWD_BUNDLE"
 # CONTENT must still come from history (that is what makes the fast-forward genuine);
 # only the installer is overridden.
 cp "$ROOT/install.sh" "$FWD_BUNDLE/install.sh"
+# A clone carries HEAD, so a manifest entry whose SOURCE FILE is still uncommitted in the
+# working tree makes the cloned bundle fail phase 1 ("bundle file missing") and this case
+# reports a fast-forward regression that isn't one. Backfill any manifest source the clone
+# lacks — every file EXCEPT the one under test, whose content must keep coming from history
+# (that is what makes the fast-forward genuine).
+while IFS= read -r rel; do
+  [ "$rel" = "$BUNDLE_SRC" ] && continue
+  [ -f "$FWD_BUNDLE/$rel" ] && continue
+  [ -f "$ROOT/$rel" ] || continue
+  mkdir -p "$FWD_BUNDLE/$(dirname "$rel")"
+  cp "$ROOT/$rel" "$FWD_BUNDLE/$rel"
+done < <(sed -n 's/^  "\([^|]*\)|.*/\1/p' "$ROOT/install.sh")
 git -C "$FWD_BUNDLE" config user.email t@t.t
 git -C "$FWD_BUNDLE" config user.name t
 t="$TMPROOT/forward"; new_target "$t"
@@ -266,6 +278,106 @@ if grep -qi "WARN: UNVERIFIABLE" <<<"$OUT"; then
   ok "non-git target: classification degrades to a WARN instead of failing"
 else
   bad "non-git target: expected an unverifiable WARN" "rc=$RC"
+fi
+
+# ------------------------------------------------ case 9: --dry-run writes NOTHING
+# The whole value of a --check is that it is inert. If it can write, it is just an install.
+t="$TMPROOT/dryrun"; new_target "$t"
+mkdir -p "$t/.claude/commands"
+printf 'target content\n' > "$t/$TARGET_REL"
+git -C "$t" add -A && git -C "$t" commit -qm c
+before="$(git -C "$t" status --porcelain | sort)$(find "$t" -type f | sort)"
+run_install "$t" --dry-run
+after="$(git -C "$t" status --porcelain | sort)$(find "$t" -type f | sort)"
+if [ "$before" = "$after" ] && grep -q "DRY RUN" <<<"$OUT" && grep -q "NOTHING was written" <<<"$OUT"; then
+  ok "dry-run: classifies without writing a single byte to the target"
+else
+  bad "dry-run: the target changed during a --dry-run" "rc=$RC"
+fi
+# It must still report the work it would do, and exit non-zero when something is kept.
+if grep -qE "^would install +\.claude/hooks/" <<<"$OUT" && [ "$RC" -ne 0 ]; then
+  ok "dry-run: reports the planned actions and exits non-zero when files would be kept"
+else
+  bad "dry-run: expected a plan listing and a non-zero exit" "rc=$RC"
+fi
+
+# --------------------------------- case 9b: --check is an alias, and classifies drift
+# Without --force a plain run never classifies — it just says DIFFERS. The point of the
+# check is to learn that a differing file is AHEAD (a refusal that would abort everything)
+# BEFORE running the install that gets blocked by it.
+#
+# Builds its OWN ahead target: case 2's --clobber-local already overwrote $AHEAD_T's file
+# with the bundle's content, so reusing it here would assert against an unchanged file.
+t="$TMPROOT/ahead-check"; new_target "$t"
+mkdir -p "$t/.claude/commands"
+cp "$ROOT/$BUNDLE_SRC" "$t/$TARGET_REL"
+git -C "$t" add -A && git -C "$t" commit -qm "install bundle version"
+printf '\nlocal work done in the target, never ported up\n' >> "$t/$TARGET_REL"
+git -C "$t" add -A && git -C "$t" commit -qm "target moves ahead"
+run_install "$t" --check
+if grep -qE "^would KEEP target +$REL_RE +\[ahead\]" <<<"$OUT" && grep -q "REFUSE" <<<"$OUT"; then
+  ok "check: --check classifies drift without --force and names the coming refusal"
+else
+  bad "check: expected an [ahead] classification naming the refusal" "rc=$RC"
+fi
+
+# ----------------------------- case 10: an out-of-set review.codeTierPolicy is rejected
+# land-pr.sh aborts a landing on a value outside the enum; install.sh used to render that
+# same value into workflow.md as though it were policy. Both must reject it.
+t="$TMPROOT/badpolicy"; new_target "$t"
+jq '.review.codeTierPolicy = "banana"' "$t/.claude/workflow.config.json" > "$t/.cfg.tmp" \
+  && mv "$t/.cfg.tmp" "$t/.claude/workflow.config.json"
+run_install "$t" --force
+if grep -q "invalid review.codeTierPolicy" <<<"$OUT" && [ "$RC" -ne 0 ] \
+   && [ ! -f "$t/.claude/references/pm/workflow.md" ]; then
+  ok "codeTierPolicy: an out-of-set value FAILS the install instead of rendering a lie"
+else
+  bad "codeTierPolicy: 'banana' must abort before anything is written" "rc=$RC"
+fi
+# ...and the two in-set values must both still install cleanly (guards an over-tight check).
+for pol in reviewer ci-only; do
+  t="$TMPROOT/pol-$pol"; new_target "$t"
+  jq --arg p "$pol" '.review.codeTierPolicy = $p' "$t/.claude/workflow.config.json" > "$t/.cfg.tmp" \
+    && mv "$t/.cfg.tmp" "$t/.claude/workflow.config.json"
+  run_install "$t"
+  if [ "$RC" -eq 0 ] && grep -q "$pol" "$t/.claude/references/pm/workflow.md"; then
+    ok "codeTierPolicy: '$pol' is accepted and rendered"
+  else
+    bad "codeTierPolicy: '$pol' is valid and must install" "rc=$RC"
+  fi
+done
+
+# -------------------------- case 11: the close-out's artifacts are actually in the bundle
+# SAD-652: commands/land.md tells the agent to run tools/dev/prune-worktrees.sh and NOT to
+# hand-run `git worktree remove` instead. If the manifest does not install that script, the
+# close-out step becomes a silent no-op on a fresh adopter — the exact failure SAD-418 was
+# filed about. Same for the /laymans rules commands/issue.md requires every filed issue to
+# follow. This asserts the referenced artifacts land on disk.
+t="$TMPROOT/closeout"; new_target "$t"
+run_install "$t"
+missing_artifacts=""
+for f in tools/dev/prune-worktrees.sh .claude/commands/prune-worktrees.md .claude/commands/laymans.md; do
+  [ -f "$t/$f" ] || missing_artifacts="$missing_artifacts $f"
+done
+if [ -z "$missing_artifacts" ] && [ -x "$t/tools/dev/prune-worktrees.sh" ]; then
+  ok "close-out: every artifact land.md/issue.md reference is installed (and the script is +x)"
+else
+  bad "close-out: referenced artifacts missing from the install:$missing_artifacts" "rc=$RC"
+fi
+# The references themselves must resolve — a dangling path in the INSTALLED command file is
+# the defect, so assert against what landed in the target, not against the bundle source.
+dangling=""
+while IFS= read -r ref; do
+  case "$ref" in
+    tools/dev/*) [ -f "$t/$ref" ] || dangling="$dangling $ref" ;;
+    .claude/*)   [ -f "$t/$ref" ] || dangling="$dangling $ref" ;;
+  esac
+done < <(grep -ohE '(tools/dev/[a-z-]+\.sh|\.claude/commands/[a-z-]+\.md)' \
+           "$t/.claude/commands/land.md" "$t/.claude/commands/issue.md" | sort -u)
+if [ -z "$dangling" ]; then
+  ok "close-out: land.md + issue.md reference no artifact the install failed to provide"
+else
+  bad "close-out: installed command files point at missing artifacts:$dangling"
 fi
 
 echo ""
