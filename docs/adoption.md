@@ -44,7 +44,7 @@ bash install.sh --target /path/to/your-repo --config your-workflow.config.json -
 
 ### Config values are validated — plan your team and project names
 
-`install.sh` substitutes seven config values into shipped files, and several of those files
+`install.sh` substitutes config values into shipped files, and several of those files
 are read by agents as **instructions** (`agents/radar.md`, `commands/issue.md`,
 `references/pm/linear.md`). Values are therefore validated at install time and a bad one
 **aborts the install with nothing written** — it does not warn and continue.
@@ -53,9 +53,9 @@ are read by agents as **instructions** (`agents/radar.md`, `commands/issue.md`,
 |---|---|
 | `tracker.issueKey` | `A-Z a-z 0-9 _` — non-empty |
 | `tracker.mcpPrefix` | `A-Z a-z 0-9 _` |
-| `git.defaultBranch` | `A-Z a-z 0-9 . _ / -` |
+| `git.defaultBranch` | `A-Z a-z 0-9 . _ / -` — non-empty |
 | `tracker.team`, `tracker.project` | `A-Z a-z 0-9`, space, `.` `_` `-` — **max 48 characters** |
-| `ci.requiredCheck` | any single line without quotes, backslash, backtick or `$` |
+| `ci.requiredCheck` | any single line without quotes, backslash, backtick or `$` — *validated but not currently substituted into any shipped file; guarded against future use* |
 
 **Team and project names are the constrained ones, and it is worth knowing before you start.**
 `Core Platform (EU)`, `R&D` and `Frontend/Backend` are rejected — parentheses, ampersands and
@@ -224,7 +224,16 @@ CI does, and it doubles as proof the manifest is complete):
 - **`test-install.sh`** — runs from the **bundle repo** (`bash scripts/test-install.sh`). Drives
   install.sh's drift classification: ahead / diverged / dirty / forward / unknown, the atomicity of a
   refusal, `--dry-run`'s inertness, `review.codeTierPolicy` validation, and that every artifact the
-  shipped commands reference actually installs.
+  shipped commands reference actually installs. It **additionally owns three controls that live
+  nowhere else**, so a failure here is not cosmetic:
+  - **config-value validation** — that a hostile `issueKey`, `team` or `project` aborts the install
+    with nothing written, and that ordinary values still install (the happy-path row exists because
+    an over-tight guard rejecting *everything* looks identical to a working one against an exploit);
+  - **the sink-delimiting control** — that every `{{TEAM}}`/`{{PROJECT}}` render sits inside a code
+    span, which is the only mitigation for prompt injection into agent-instruction files;
+  - **this repo's own tier map** — the per-path rows are the *only* automation exercising
+    `.claude/workflow.config.json`, because `test-land-pr.sh`'s config-vs-fallback identity
+    assertion holds only for a config identical to instance #1 and so cannot run here.
 - **`test-hooks.sh`** (installed to `tools/dev/`) — feeds synthetic hook payloads to the safety hooks
   and asserts exit codes across the D/F/W rules, quoting/prefix-normalization bypasses, refspec
   spellings, and the secret patterns. No command in its table is ever executed. Run it after any hook

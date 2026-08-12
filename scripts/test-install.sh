@@ -405,6 +405,27 @@ else
   bad "value validation: a {{VAR}} placeholder is interpolated into shell source" "$_src_ph"
 fi
 
+# ----------------------------- extraction non-vacuity, shared
+# ⚠ THIRD INSTANCE OF ONE CLASS, so it is a helper rather than a third bespoke guard.
+# Rows below derive their inputs by EXTRACTING from another file — the MANIFEST list,
+# glob_to_ere's definition. Every such extraction has the same failure mode: the source
+# stays functional, the extraction silently yields nothing, and the row passes while
+# checking NOTHING. Three times in this file already:
+#   _src_ph      — two wrong versions, both "reddened against nothing" (Watson)
+#   tier map     — a glob_to_ere reformat empties _sec_ere, `grep -qE ""` matches
+#                  everything, all 15 security rows pass vacuously (Watson)
+#   sink row     — a MANIFEST reindent yields 2 garbage entries, 0 sinks covered, and
+#                  the backtick-strip regression goes invisible again (Barb, measured)
+# An extraction without a positive control is not evidence.
+_assert_extracted() { # $1 = label  $2 = extracted text  $3 = a value that MUST appear
+  if ! grep -qxF -- "$3" <<<"$2"; then
+    bad "$1: extraction broke — the row(s) below would pass vacuously" \
+        "expected '\''$3'\'' among $(grep -c . <<<"$2") entries"
+    return 1
+  fi
+  return 0
+}
+
 # ----------------------------- case 9b2: the SINK mitigation is pinned
 # ⚠ Backtick delimiting is now the ONLY control that mitigates instruction injection —
 # the charset and length guards are documented in install.sh as NOT converging on it.
@@ -419,10 +440,12 @@ fi
 # The charset allowlist excludes the backtick, so a value can never close its own code
 # span: the charset makes containment unbreakable and the delimiter provides it. Both
 # halves are needed and this row pins the half that had no test.
+_sinks=$(sed -n 's/^  "\([^|]*\)|.*/\1/p' "$ROOT/install.sh")
+_assert_extracted "sink" "$_sinks" "agents/radar.md"
 _undelim=$(while IFS= read -r rel; do
     [ -f "$ROOT/$rel" ] || continue
     sed 's/`[^`]*`//g' "$ROOT/$rel" | grep -n '{{TEAM}}\|{{PROJECT}}' | sed "s|^|$rel:|"
-  done < <(sed -n 's/^  "\([^|]*\)|.*/\1/p' "$ROOT/install.sh"))
+  done <<<"$_sinks")
 if [ -z "$_undelim" ]; then
   ok "sink: every {{TEAM}}/{{PROJECT}} render sits inside a code span"
 else
