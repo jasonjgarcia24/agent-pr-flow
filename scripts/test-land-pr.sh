@@ -105,6 +105,85 @@ sad_case "no anchor at all -> first-match fallback, flagged as such" "fallback S
   "relates to SAD-7 and SAD-9"
 sad_case "no SAD-N at all -> none" "none" "docs: tidy the README" "nothing to see"
 
+# ---------- locale independence of the id shape (SAD-551) ----------
+# The SAD-id classes are ENUMERATED ([0123456789]) because GNU grep 3.11 under
+# this box's en_US.UTF-8 overruns the reported MATCH EXTENT of a RANGE bracket
+# expression when a non-ASCII decimal digit follows an ASCII one — so `grep -o`
+# emits the trailing garbage and the EXTRACTED id is corrupted. See the block
+# above _sad_anchor_ids in land-pr.sh.
+#
+# THE case that discriminates the enumerated class from the range: it goes RED
+# against [0-9] (resolves to the malformed id `SAD-538<d9 a5>`). Anyone
+# "simplifying" the class back to [0-9] trips this. The non-leading position is
+# load-bearing — in a LEADING position the range never matches at all, so a
+# leading-only test passes against BOTH forms and pins nothing.
+sad_case "non-ASCII digit in a NON-leading position truncates cleanly" "anchor SAD-538" "t" \
+  "$(printf 'Fixes SAD-538\xd9\xa5\n')"
+# Characterization only — these two pass against both forms (a leading non-ASCII
+# digit means the `+` has nothing to anchor on). Kept for the shape, NOT relied
+# on as pins; the non-leading case above is the one that discriminates.
+sad_case "non-ASCII digits are not a SAD id (Arabic-Indic)" "none" "t" \
+  "$(printf 'Fixes SAD-\xd9\xa5\xd9\xa3\xd9\xa8\n')"
+sad_case "non-ASCII digits are not a SAD id (fullwidth)" "none" "t" \
+  "$(printf 'Fixes SAD-\xef\xbc\x95\xef\xbc\x93\xef\xbc\x98\n')"
+# Guards the OTHER direction: goes RED the moment anyone pins the ranges with
+# LC_ALL=C instead, because that changes LC_CTYPE too and "präfixes" would then
+# read as a closing anchor — reopening the exact wrong-issue write \b closes.
+#
+# Run with a HOSTILE locale on purpose. Asserting this under the developer's
+# ambient en_US.UTF-8 only proves the property in a friendly environment: before
+# land-pr.sh pinned LC_CTYPE, this exact case failed on UNCHANGED code under
+# LC_ALL=C / LANG=C / LC_CTYPE=C — a false RED for anyone running the harness
+# from a bare container or stripped CI shell, and a live false anchor in
+# production for the same callers. LC_ALL=C is the strongest form: it outranks
+# LC_CTYPE, so it also proves the pin's `unset LC_ALL` is doing its job.
+# Watson Important, PR #399 / SAD-551.
+sad_case_hostile() { # $1 = label, $2 = expected, $3 = title, $4 = body
+  local got
+  got="$(LC_ALL=C LAND_PR_TEST=1 LAND_PR_SADTEST=1 tools/dev/land-pr.sh 0 <<<"$3
+$4")"
+  [ "$got" = "$2" ] \
+    && echo "PASS  $1" \
+    || { echo "FAIL  $1 — expected '$2', got '$got'"; fail=1; }
+}
+sad_case_hostile "'präfixes SAD-N' is NOT an anchor even under LC_ALL=C" "fallback SAD-7" "t" \
+  "$(printf 'pr\xc3\xa4fixes SAD-7\n')"
+
+# ---------- picker seam: unterminated stdin (SAD-551) ----------
+# `read` assigns the partial line and THEN returns non-zero at EOF, so the old
+# `|| _sad_t=""` threw away a title that arrived without a trailing newline.
+# Only the SEAM is affected — the real G8 passes title/body as ARGUMENTS — but
+# the seam is what every case above trusts, so it has to resolve the same text
+# production does. Watson, PR #399.
+sad_raw_case() { # $1 = label, $2 = expected, $3 = exact stdin (printf %b escapes)
+  local got
+  got="$(printf '%b' "$3" | LAND_PR_TEST=1 LAND_PR_SADTEST=1 tools/dev/land-pr.sh 0)"
+  [ "$got" = "$2" ] \
+    && echo "PASS  $1" \
+    || { echo "FAIL  $1 — expected '$2', got '$got'"; fail=1; }
+}
+sad_raw_case "unterminated title (no trailing newline) survives" "anchor SAD-9" 'fixes SAD-9'
+sad_raw_case "unterminated body still resolves its anchor" "anchor SAD-200" \
+  'fix: SAD-100 regresses the node ring\nFixes SAD-200'
+sad_raw_case "empty stdin -> none (set -u stays satisfied)" "none" ''
+# CLOSED fd 0, not merely empty: `read` errors WITHOUT assigning, which `set -u`
+# turns into "_sad_t: unbound variable" unless the variable is pre-seeded. The
+# old `|| _sad_t=""` covered this incidentally; `|| :` alone does not.
+#
+# Pinned on the IDIOM rather than by driving land-pr.sh with `<&-`: the seam's
+# next statement is `_sad_b="$(cat)"`, and `cat` on a closed fd 0 blocks, so the
+# whole-script route hangs the suite instead of asserting. Keep it this shape.
+# Barb LOW-1, PR #399 / SAD-551.
+_seam_idiom='set -u; _sad_t=""; IFS= read -r _sad_t || :; printf "[%s]" "$_sad_t"'
+got="$(timeout 10 bash -c "$_seam_idiom" <&- 2>/dev/null)"
+[ "$got" = "[]" ] \
+  && echo "PASS  closed fd 0 -> empty (pre-seed keeps set -u satisfied)" \
+  || { echo "FAIL  closed fd 0 -> empty — expected '[]', got '$got'"; fail=1; }
+got="$(printf 'abc' | timeout 10 bash -c "$_seam_idiom" 2>/dev/null)"
+[ "$got" = "[abc]" ] \
+  && echo "PASS  the same idiom still keeps an unterminated line" \
+  || { echo "FAIL  idiom lost the unterminated line — expected '[abc]', got '$got'"; fail=1; }
+
 # The seam itself must be refused without LAND_PR_TEST=1 — it skips every gate,
 # so --dry-run is NOT sufficient authorization (Barb MEDIUM, PR #399).
 if LAND_PR_SADTEST=1 tools/dev/land-pr.sh 0 --dry-run </dev/null >/dev/null 2>&1; then

@@ -27,6 +27,33 @@
 
 set -u
 
+# ---------- locale: pin the CTYPE, deliberately not the collation ----------
+# `\b` is an LC_CTYPE predicate, and this script inherits the caller's locale.
+# Under a C ctype a non-ASCII byte stops counting as a word character, so the
+# G8 anchor guard's word boundary fires MID-WORD and "präfixes SAD-7" resolves
+# as a closing anchor — a wrong-issue write, live in production for any caller
+# with a stripped environment (bare container, systemd unit, CI shell with no
+# LANG). Verified on glibc 2.39: LC_ALL=C, LANG=C and LC_CTYPE=C all reproduce.
+#
+# C.UTF-8, NEVER C — C.UTF-8 keeps a UTF-8 ctype; C is what widens \b.
+#
+# The `unset LC_ALL` is load-bearing and NOT optional: LC_ALL OUTRANKS LC_CTYPE,
+# so `export LC_CTYPE=C.UTF-8` alone is silently defeated by an inherited
+# LC_ALL=C — which is the most likely hostile case, since LC_ALL=C is the
+# canonical way a script or CI job strips locale. Verified: with LC_ALL=C in the
+# environment, the ctype-only form still yields the false anchor.
+#
+# LC_COLLATE is left to the caller ON PURPOSE. Pinning it too (LC_ALL=C.UTF-8)
+# would also mask the `grep -o` range-extent defect, which would make the
+# enumerated digit classes below look redundant and invite their removal — the
+# enumeration is the load-bearing fix for that half and must stay so. There are
+# no collation-dependent operations (no sort/uniq/[[ < ]]) in this script.
+# Watson Important, PR #399 / SAD-551.
+if [ "$(LC_ALL=C.UTF-8 locale charmap 2>/dev/null)" = "UTF-8" ]; then
+  unset LC_ALL
+  export LC_CTYPE=C.UTF-8
+fi
+
 # ---------- G0: prereqs ----------
 die() { echo "land-pr [G$1]: FAIL — $2" >&2; exit 1; }
 
@@ -42,8 +69,43 @@ for arg in "$@"; do
   esac
 done
 
-grep -qE '^[0-9]+$' <<<"$pr" || die 0 "PR number required (got: '${pr}')"
+# SAD-id digit classes are ENUMERATED ([0123456789]), never the range [0-9].
+# This is a live bug fix in THIS box's locale, not a portability nicety — do not
+# "simplify" it back to [0-9]. GNU grep 3.11 under en_US.UTF-8 overruns the
+# reported MATCH EXTENT of a range bracket expression when a non-ASCII decimal
+# digit follows an ASCII one, so `grep -o` EMITS the trailing garbage:
+#
+#   printf 'Fixes SAD-538\xd9\xa5'  (U+0665 ARABIC-INDIC DIGIT FIVE)
+#     grep -oE 'SAD-[0-9]+'         -> SAD-538<d9 a5>   (malformed id)
+#     grep -oE 'SAD-[0123456789]+'  -> SAD-538          (clean truncation)
+#
+# It is NOT class membership — `grep -qE 'SAD-0[0-9] '` correctly does NOT match
+# the same bytes. That distinction matters here because _sad_anchor_ids is built
+# entirely on `grep -o`, so the EXTRACTED ID is what gets corrupted. 513 of the
+# 670 non-ASCII Unicode Nd codepoints leak through the range in a NON-LEADING
+# position (0 in a leading one, which is why a leading-only sweep misses it);
+# 0 leak through the enumerated class. Same 513 under en_GB.utf8; 0 under C.
+#
+# `LC_ALL=C` also stops the leak, but it is the WRONG tool: it changes LC_CTYPE
+# too, which widens `\b` — under LC_ALL=C "präfixes SAD-7" IS read as a closing
+# anchor (the non-ASCII byte stops counting as a word character), reopening the
+# exact wrong-issue write the \b guard below closes. Enumerating fixes the
+# extent bug without touching LC_CTYPE. Both properties are pinned in
+# tools/dev/test-land-pr.sh. Barb, PR #399 / SAD-551.
+#
+# Scope: this rule covers the SAD-id classes and the PR-number gate. The marker
+# and config validators below deliberately keep ranges ([A-Z_]+ sha=[0-9a-f]{40}
+# at the verdict reader, *[!A-Za-z0-9_/-]* on git.defaultBranch, *[!a-z-]* on
+# marker names). Those are safe for a different reason: each is a fixed-width or
+# NEGATED validator that FAILS CLOSED — a widened extent there yields a
+# non-matching marker or a rejected config value, never a forged pass.
+grep -qE '^[0123456789]+$' <<<"$pr" || die 0 "PR number required (got: '${pr}')"
 command -v jq >/dev/null 2>&1 || die 0 "jq missing"
+# awk is a hard prereq of the G8 anchor picker (de-duplication). Without it the
+# picker silently yields nothing and the close-out degrades to `fallback` —
+# naming a RELATED issue as the closed one, which is the failure SAD-538 fixed.
+# Fail loud instead of fail-quiet. Barb Info, PR #399 / SAD-551.
+command -v awk >/dev/null 2>&1 || die 0 "awk missing (the G8 SAD-anchor picker de-duplicates through it)"
 # The LAND_PR_SELFTEST classifier and the LAND_PR_SADTEST picker
 # (tools/dev/test-land-pr.sh) need only jq + the config; skip the gh-dependent
 # checks so they run OFFLINE in CI (SAD-257 (c), SAD-538).
@@ -99,8 +161,8 @@ fi
 
 # Canonical, de-duplicated, order-preserving SAD-N anchors from stdin.
 _sad_anchor_ids() {
-  grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*:?[[:space:]]+SAD-[0-9]+' \
-    | grep -oiE 'SAD-[0-9]+' \
+  grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*:?[[:space:]]+SAD-[0123456789]+' \
+    | grep -oiE 'SAD-[0123456789]+' \
     | tr '[:lower:]' '[:upper:]' \
     | awk '!seen[$0]++'
 }
@@ -131,7 +193,7 @@ resolve_sad() {  # $1 = PR title, $2 = PR body; sets sad_pick / sad_how
   # No anchor anywhere → first-match over both fields, so anchorless and legacy
   # PRs still resolve. Newline-joined, never space-joined (see above).
   sad_pick="$(printf '%s\n%s\n' "$1" "$2" \
-    | grep -oiE '\bSAD-[0-9]+' | tr '[:lower:]' '[:upper:]' | head -1)"
+    | grep -oiE '\bSAD-[0123456789]+' | tr '[:lower:]' '[:upper:]' | head -1)"
   if [ -n "$sad_pick" ]; then sad_how="fallback"; else sad_how="none"; fi
 }
 
@@ -140,7 +202,18 @@ resolve_sad() {  # $1 = PR title, $2 = PR body; sets sad_pick / sad_how
 # the real G8 call passes. Resolves and exits; no PR is read or touched, and no
 # config is needed, so it runs offline.
 if [ "${LAND_PR_SADTEST:-0}" = "1" ]; then
-  IFS= read -r _sad_t || _sad_t=""
+  # Pre-seed, then `|| :` — NOT `|| _sad_t=""`. At EOF `read` ASSIGNS the partial
+  # line and THEN returns non-zero, so the assignment form threw away a title
+  # that arrived without a trailing newline. `|| :` keeps it. The pre-seed covers
+  # what `|| _sad_t=""` was incidentally guaranteeing: `read` assigns empty on
+  # genuinely EMPTY stdin, but on a CLOSED fd 0 it errors without assigning at
+  # all, which `set -u` turns into "_sad_t: unbound variable". All three shapes
+  # now hold — empty -> "", closed -> "", unterminated -> partial line kept.
+  # The real G8 passes title/body as ARGUMENTS, so only this seam was affected —
+  # but the seam is what tools/dev/test-land-pr.sh trusts, which made the tests
+  # validate slightly different input than production resolves.
+  # Watson + Barb LOW-1, PR #399 / SAD-551.
+  _sad_t=""; IFS= read -r _sad_t || :
   _sad_b="$(cat)"
   resolve_sad "$_sad_t" "$_sad_b"
   echo "${sad_how}${sad_pick:+ $sad_pick}"
@@ -433,7 +506,7 @@ else
 fi
 
 # ---------- G5: SAD linkage (WARN only) ----------
-if grep -qE 'SAD-[0-9]+' <<<"$title$body"; then
+if grep -qE 'SAD-[0123456789]+' <<<"$title$body"; then
   note "G5 PASS  SAD linkage present"
 else
   note "G5 WARN  no SAD-N in title/body — Linear won't auto-transition"
