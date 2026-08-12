@@ -9,36 +9,97 @@
 
 set -u
 
-ROOT="$(git rev-parse --show-toplevel)" || exit 1
+# ⚠ ROOT IS DERIVED FROM THIS SCRIPT'S OWN LOCATION, NOT THE CALLER'S CWD
+# (SAD-731). A bare `git rev-parse --show-toplevel` resolves against wherever the
+# operator happens to be standing, so running this suite from a SIBLING checkout
+# silently audits that OTHER tree's hooks with this tree's table — and reports a
+# perfectly normal-looking result. That produced two false measurements during one
+# review, in different sessions: a plausible `469 PASS / 10 FAIL` taken while the
+# mutations under test were no-ops against a different tree's hook, and a separate
+# unreproducible single failure. Neither looked like an error; both looked like
+# results. For a suite whose entire value is RED-checkability, a false GREEN is the
+# worst available failure mode, so the tree under test is pinned to the tree the
+# script was loaded from.
+ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)" || exit 1
 H="$ROOT/.claude/hooks"
-pass=0; fail=0
+pass=0; fail=0; retried=0
 
 mk() { # $1 = command, $2 = cwd (default repo root)
   jq -n --arg c "$1" --arg d "${2:-$ROOT}" '{tool_input:{command:$c}, cwd:$d}'
 }
 
-t() { # $1=case name  $2=expected rc  $3=command  [$4=extra env "K=V [K=V...]"]  [$5=cwd]
+# ⚠ ONE invocation path, called twice. The primary call and the deadline retry
+# below were character-identical duplicates; a future edit to one — a new env
+# var, a changed payload shape — would silently desync the retry from the path it
+# is supposed to re-run, with nothing turning red.
+# Returns via globals because command substitution can carry only ONE value and
+# this helper must return TWO — the captured output AND the exit status. The
+# limit is arity, not propagation (`$?` propagates out of a subshell fine).
+# It also `return`s the status, so `if _invoke …` or `_invoke … || fail` behave
+# rather than always taking the success path.
+_INV_OUT=""; _INV_RC=0
+_invoke() { # $1=cmd $2=cwd $3=extra-env
+  if [ -n "$3" ]; then
+    # shellcheck disable=SC2086 # word-splitting multiple K=V assignments is the point
+    _INV_OUT=$(mk "$1" "$2" | env CLAUDE_PROJECT_DIR="$ROOT" $3 bash "$H/pre-bash-safety.sh" 2>&1); _INV_RC=$?
+  else
+    _INV_OUT=$(mk "$1" "$2" | env CLAUDE_PROJECT_DIR="$ROOT" bash "$H/pre-bash-safety.sh" 2>&1); _INV_RC=$?
+  fi
+  return "$_INV_RC"
+}
+
+t() { # $1=name $2=expected rc $3=command [$4=extra env] [$5=cwd] [$6=expected rule id]
   # extra comes AFTER the default CLAUDE_PROJECT_DIR so tests can override the
   # project scope (SAD-181 repo-scoped F-rows); deliberate word-split.
-  local name="$1" expect="$2" cmd="$3" extra="${4:-}" cwd="${5:-$ROOT}"
-  local rc out
-  if [ -n "$extra" ]; then
-    # shellcheck disable=SC2086 # word-splitting multiple K=V assignments is the point
-    out=$(mk "$cmd" "$cwd" | env CLAUDE_PROJECT_DIR="$ROOT" $extra bash "$H/pre-bash-safety.sh" 2>&1); rc=$?
-  else
-    out=$(mk "$cmd" "$cwd" | env CLAUDE_PROJECT_DIR="$ROOT" bash "$H/pre-bash-safety.sh" 2>&1); rc=$?
+  # $6 (optional): assert WHICH rule blocked. Without it an expected-2 case
+  # passes if ANY rule fires, so a test can go green for the wrong reason. Pass
+  # it on adversarial rows where the identity of the rule is the point.
+  local name="$1" expect="$2" cmd="$3" extra="${4:-}" cwd="${5:-$ROOT}" rule="${6:-}"
+  local rc out got
+  _invoke "$cmd" "$cwd" "$extra"; out="$_INV_OUT"; rc="$_INV_RC"
+  if [ "$rc" != "$expect" ]; then
+    echo "FAIL  $name (rc=$rc expected=$expect) :: $out"; fail=$((fail+1)); return
   fi
-  if [ "$rc" = "$expect" ]; then
-    echo "PASS  $name (rc=$rc)"; pass=$((pass+1))
-  else
-    echo "FAIL  $name (rc=$rc expected=$expect) :: $out"; fail=$((fail+1))
+  if [ -n "$rule" ]; then
+    got=$(sed -n 's/^pre-bash-safety \[\([A-Z0-9]*\)\].*/\1/p' <<<"$out" | head -1)
+    # ⚠ DEADLINE IS THE ONE NONDETERMINISTIC VERDICT — retry once before failing.
+    # Deliberately-expensive adversarial rows cost seconds per hook invocation
+    # against HOOK_DEADLINE_S=20, so on a loaded box a row can return DEADLINE
+    # where it expects its own rule. Measured on the reference instance
+    # (endurance-logger, whose rule set is a superset of this bundle's): 1 run in
+    # 4 returning DEADLINE, which under a zero-headroom assertion floor fires
+    # TWICE — as a suite failure AND as an under-count against the floor. A pin
+    # that reddens a healthy tree is worse than the gap it closes.
+    # A single retry preserves the assertion's meaning exactly: the deadline is
+    # the only verdict that depends on wall-clock, so a row that genuinely blocks
+    # on its own rule cannot be rescued by re-running, and a row whose rule really
+    # regressed still fails on the second run. Do NOT lower the deadline instead
+    # — that reintroduces the headroom the hardcoded threshold removed.
+    if [ "$got" = "DEADLINE" ] && [ "$rule" != "DEADLINE" ]; then
+      # ⚠ REPORT THE RETRY. Silently squaring the per-row failure probability
+      # buys the green at the cost of the signal: a hook change that makes a rule
+      # reachable only SOMETIMES — it still fires, but now races the deadline —
+      # would be absorbed instead of surfaced.
+      # The line deliberately does NOT start with `PASS`: an assertion-floor
+      # check that counts `PASS*` lines must not be inflated by a retry notice.
+      echo "RETRY $name (first run returned DEADLINE; re-running once)"; retried=$((retried+1))
+      _invoke "$cmd" "$cwd" "$extra"; out="$_INV_OUT"; rc="$_INV_RC"
+      if [ "$rc" != "$expect" ]; then
+        echo "FAIL  $name (rc=$rc expected=$expect, on deadline retry) :: $out"; fail=$((fail+1)); return
+      fi
+      got=$(sed -n 's/^pre-bash-safety \[\([A-Z0-9]*\)\].*/\1/p' <<<"$out" | head -1)
+    fi
+    if [ "$got" != "$rule" ]; then
+      echo "FAIL  $name (rule=$got expected=$rule) :: $out"; fail=$((fail+1)); return
+    fi
   fi
+  echo "PASS  $name (rc=$rc${rule:+ rule=$rule})"; pass=$((pass+1))
 }
 
 echo "== pre-bash-safety.sh: D-rows =="
 t "D1 reset --hard blocked"          2 'git reset --hard HEAD~1'
 t "D1 escape hatch"                  0 'git reset --hard HEAD~1' 'ALLOW_DESTRUCTIVE=1'
-t "D1 -C form blocked"               2 'git -C /some/repo reset --hard origin/main'
+t "D1 -C form blocked"               2 'git -C /some/repo reset --hard origin/main' '' '' D1
 t "reset --soft allowed"             0 'git reset --soft HEAD~1'
 t "D2 clean -fd blocked"             2 'git clean -fd'
 t "D2 dry-run allowed"               0 'git clean -nfd'
@@ -83,23 +144,23 @@ t "quoted safe path allowed"         0 'rm -rf "build/tmp dir"'
 
 echo "== Watson review probes =="
 t "D3 rm -rf . at repo root blocked" 2 'rm -rf .'
-t "D3 rm -rf * at repo root blocked" 2 'rm -rf *'
-t "D3 rm -rf ./ at repo root blocked" 2 'rm -rf ./'
+t "D3 rm -rf * at repo root blocked" 2 'rm -rf *' '' '' D3
+t "D3 rm -rf ./ at repo root blocked" 2 'rm -rf ./' '' '' D3
 t "rm -rf . in subdir allowed"       0 'rm -rf .' '' "$ROOT/app/build"
-t "D7 release.keystore blocked"      2 'git add release.keystore'
+t "D7 release.keystore blocked"      2 'git add release.keystore' '' '' D7
 t "D7 debug.keystore blocked"        2 'git add app/debug.keystore'
-t "D1 subshell form blocked"         2 '(git reset --hard)'
-t "D1 env-prefix form blocked"       2 'GIT_DIR=x git reset --hard'
-t "D1 after single & blocked"        2 'sleep 1 & git reset --hard'
-t "D6 combined -uf blocked"          2 'git push -uf origin feature'
-t "D5 path-prefixed adb blocked"     2 '/usr/bin/adb shell ls'
-t "D4 path-prefixed adb blocked"     2 '/usr/local/bin/adb kill-server'
+t "D1 subshell form blocked"         2 '(git reset --hard)' '' '' D1
+t "D1 env-prefix form blocked"       2 'GIT_DIR=x git reset --hard' '' '' D1
+t "D1 after single & blocked"        2 'sleep 1 & git reset --hard' '' '' D1
+t "D6 combined -uf blocked"          2 'git push -uf origin feature' '' '' D6
+t "D5 path-prefixed adb blocked"     2 '/usr/bin/adb shell ls' '' '' D5
+t "D4 path-prefixed adb blocked"     2 '/usr/local/bin/adb kill-server' '' '' D4
 t "push --follow-tags allowed"       0 'git push --follow-tags origin feature'
 out=$(mk 'sh -x tools/dev/setup-repo.sh' | env CLAUDE_PROJECT_DIR="$ROOT" bash "$H/pre-bash-safety.sh" 2>/dev/null); rc=$?
 if [ "$rc" = "0" ] && grep -q "systemMessage" <<<"$out"; then echo "PASS  W1 sh -x warns too"; pass=$((pass+1)); else echo "FAIL  W1 sh -x (rc=$rc)"; fail=$((fail+1)); fi
 
 echo "== Barb audit probes (quote/prefix normalization, D0, D5 grammar) =="
-t "D1 quoted --hard blocked"         2 'git reset "--hard" HEAD~3'
+t "D1 quoted --hard blocked"         2 'git reset "--hard" HEAD~3' '' '' D1
 t "D2 quoted -fd blocked"            2 'git clean "-fd"'
 t "D6 quoted --force blocked"        2 'git push "--force" origin main'
 t "D1 sudo prefix blocked"           2 'sudo git reset --hard'
@@ -247,6 +308,62 @@ t "D1 \$* positional glue blocked"            2 "git ${pStar}reset --hard"
 t "D1 braced \${@} glue blocked"              2 "git ${pAtB}reset --hard"
 t "D1 \$1 low-boundary glue blocked"          2 "git ${p1}reset --hard"
 
+echo "== scan deadline: both operands closed, and the bound reaches its call sites =="
+# The deadline exists because past the PreToolUse timeout the gate is KILLED and
+# the command runs UNCHECKED — every rule disabled at once. These rows pin the
+# three ways that control silently stops working. They are deliberately CHEAP:
+# the reference instance carries a much larger timed-probe suite (scaling ratios,
+# execution probes, adversarial fixpoint payloads); porting that here would add
+# minutes of wall-clock to a bundle suite that has no CI to absorb it. What is
+# ported is the part that fails SILENTLY — a timed probe that regresses at least
+# goes red on the clock.
+
+# 1. THRESHOLD closed to the environment. An env-overridable HOOK_DEADLINE_S
+#    would be a new escape hatch D0 cannot see: D0 blocks INLINE assignments,
+#    and ambient env is invisible to it.
+if grep -qE '^HOOK_DEADLINE_S=[0-9]+$' "$H/pre-bash-safety.sh"; then
+  echo "PASS  deadline: threshold is a hardcoded literal, not \${HOOK_DEADLINE_S:-20}"; pass=$((pass+1))
+else
+  echo "FAIL  deadline: HOOK_DEADLINE_S is not a hardcoded literal — an ambient HOOK_DEADLINE_S=999 would disable the bound, and D0 cannot see ambient env"; fail=$((fail+1))
+fi
+
+# 2. CLOCK closed to the environment — the runtime half, not a grep. `SECONDS`
+#    is INHERITED, so hardcoding the threshold closes only ONE operand of the
+#    comparison. Probed against a COPY of the real hook with the threshold sed
+#    to 0, so the row costs milliseconds instead of needing a payload expensive
+#    enough to burn 20 s. The sed touches only the constant; the `SECONDS=0`
+#    reset under test is the real line from the real file.
+_dl_copy="$(mktemp)"; sed 's/^HOOK_DEADLINE_S=[0-9]*$/HOOK_DEADLINE_S=0/' "$H/pre-bash-safety.sh" > "$_dl_copy"
+_dl_out="$(mk 'echo hello' "$ROOT" | env CLAUDE_PROJECT_DIR="$ROOT" SECONDS=-999999999 bash "$_dl_copy" 2>&1)"; _dl_rc=$?
+if [ "$_dl_rc" = "2" ] && grep -q '\[DEADLINE\]' <<<"$_dl_out"; then
+  echo "PASS  deadline: a poisoned ambient SECONDS does not defeat the bound (clock is reset)"; pass=$((pass+1))
+else
+  echo "FAIL  deadline: with an ambient SECONDS=-999999999 the zero-threshold hook returned rc=$_dl_rc — '[ \$SECONDS -lt \$HOOK_DEADLINE_S ]' is permanently true, so the deadline is disabled by an env var. Add 'SECONDS=0' before the first _deadline call: $_dl_out"; fail=$((fail+1))
+fi
+# Non-vacuity of the row above: the same probe against a copy with the reset
+# REMOVED must go the other way. Without this, a hook that lost its deadline
+# entirely would still satisfy the row if something else happened to block.
+_dl_noreset="$(mktemp)"; grep -v '^SECONDS=0$' "$_dl_copy" > "$_dl_noreset"
+_dl_n_out="$(mk 'echo hello' "$ROOT" | env CLAUDE_PROJECT_DIR="$ROOT" SECONDS=-999999999 bash "$_dl_noreset" 2>&1)"; _dl_n_rc=$?
+if [ "$_dl_n_rc" = "0" ]; then
+  echo "PASS  deadline: the reset is load-bearing — removing it reopens the fail-open (rc=0 under poisoned SECONDS)"; pass=$((pass+1))
+else
+  echo "FAIL  deadline: removing 'SECONDS=0' did NOT reopen the fail-open (rc=$_dl_n_rc) — the row above cannot distinguish a working reset from a hook that blocks for some other reason, so it is vacuous: $_dl_n_out"; fail=$((fail+1))
+fi
+rm -f "$_dl_copy" "$_dl_noreset"
+
+# 3. CALL SITES. The bound is only as complete as the places that call it: a new
+#    loop over segments or tokens added without a `_deadline` is unbounded, and
+#    nothing else in this file would notice. Counting the call sites turns that
+#    into a deliberate decision (raise the number) instead of a silent gap.
+_dl_sites=$(grep -cE '^[[:space:]]+_deadline$' "$H/pre-bash-safety.sh")
+_dl_expected=4
+if [ "$_dl_sites" -eq "$_dl_expected" ]; then
+  echo "PASS  deadline: the hook has exactly $_dl_sites _deadline call sites (1 segment loop + 3 token loops)"; pass=$((pass+1))
+else
+  echo "FAIL  deadline: _deadline call-site count changed (found $_dl_sites, expected $_dl_expected) — a new loop without a _deadline runs unbounded, and a removed one silently drops the bound on that phase. If the change is legitimate, raise the expected count deliberately"; fail=$((fail+1))
+fi
+
 echo "== jq fail-closed =="
 out=$(mk 'echo hi' | env PATH=/nonexistent /bin/bash "$H/pre-bash-safety.sh" 2>&1); rc=$?
 if [ "$rc" = "2" ]; then echo "PASS  jq missing fails closed (rc=2)"; pass=$((pass+1)); else echo "FAIL  jq missing (rc=$rc) :: $out"; fail=$((fail+1)); fi
@@ -298,4 +415,9 @@ if [ "$rc" = "0" ]; then echo "PASS  no config -> fast no-op"; pass=$((pass+1));
 
 echo ""
 echo "RESULT: $pass passed, $fail failed"
+# RETRIES is reported beside the result so latency drift is visible without
+# reading the body: a suite that is green only because it re-ran rows is a
+# different state from one that was green first time, and the difference is
+# exactly the early warning that a rule has started racing the deadline.
+echo "RETRIES: $retried deadline re-runs"
 [ "$fail" = "0" ]

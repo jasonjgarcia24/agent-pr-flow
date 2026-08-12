@@ -33,6 +33,15 @@
 #   ALLOW_MAIN_PUSH=1    permit F2/F3/F4 (F1/F5 have NO escape)
 
 set -uf
+# ---- CLOSE THE INHERITED CLOCK, before anything is measured or split ----
+# `SECONDS` is a special shell variable INHERITED FROM THE ENVIRONMENT, and it
+# feeds the deadline below. Without this reset an ambient `SECONDS=-999999999`
+# makes `[ "$SECONDS" -lt 20 ]` permanently true, restoring the exact fail-open
+# the deadline exists to close. Reset HERE rather than at the point of use so
+# the measured window is the hook's whole lifetime — the calibration reasons
+# about margin to the PreToolUse timeout, and the preamble forks (jq, git
+# rev-parse) would otherwise sit outside it.
+SECONDS=0
 
 [ "${SKIP_BASH_SAFETY:-0}" = "1" ] && exit 0
 
@@ -86,12 +95,48 @@ block() { # $1 = rule id, $2 = message
   exit 2
 }
 
+# ---- scan deadline ----
+# Past the PreToolUse timeout Claude Code KILLS the hook and runs the command
+# UNCHECKED — every rule in this file disabled at once. That is the worst
+# available failure mode for a gate, so the scan refuses rather than racing the
+# clock: an adversarial payload that can make the scan slow enough to be killed
+# would otherwise buy a total bypass by construction.
+#
+# BOTH OPERANDS ARE CLOSED TO THE ENVIRONMENT, which takes two separate things:
+# the THRESHOLD is hardcoded (an env-overridable `HOOK_DEADLINE_S=999` would be
+# a new escape hatch D0 cannot see — D0 blocks INLINE assignments, and ambient
+# env is invisible to it), AND the CLOCK is reset at the top of the file,
+# because `SECONDS` is inherited. Closing only the first and claiming
+# env-immunity for the whole control is a false assurance inside the control
+# that enforces everything else; see the `SECONDS=0` note above.
+#
+# ⚠ Calibration inputs — MEASURED ON THE REFERENCE INSTANCE (endurance-logger),
+# NOT on this bundle. Recorded with their source named rather than as bare
+# integers, because a figure whose tree of origin is unstated is the defect this
+# bundle keeps re-fixing. PreToolUse default timeout 60 s (settings.json sets
+# none); worst measured per-source cost ~1.1 s, so overshoot past the check is
+# ~1-2 s; worst everyday command 1.14 s; worst real historical command under the
+# ceiling 56.8 s at load 48. 20 s leaves ~38 s of margin to the timeout while
+# sitting ~17x above everyday traffic. This bundle's own rule set is a SUBSET of
+# the reference instance's, so its scan is cheaper and the margin is wider —
+# the threshold is therefore conservative here, not tuned.
+#
+# ⚠ The bound is only as complete as its call sites. If you add a new loop over
+# segments or tokens, it needs a `_deadline` too.
+HOOK_DEADLINE_S=20
+_deadline() {
+  [ "$SECONDS" -lt "$HOOK_DEADLINE_S" ] && return 0
+  seg="(scan exceeded ${HOOK_DEADLINE_S}s)"
+  block DEADLINE "this gate's scan exceeded ${HOOK_DEADLINE_S}s. Past the PreToolUse timeout the gate would be KILLED and the command would run UNCHECKED, with every rule disabled at once — so it refuses instead of racing the clock. Split this into separate Bash calls, or author long content with the Write/Edit tools and pass a PATH."
+}
+
 # Split on && || ; | and single & (POSIX leftmost-longest keeps && winning);
 # `2>&1` noise segments are harmless.
 mapfile -t segments < <(sed -E 's/&&|\|\||;|\||&/\n/g' <<<"$cmd")
 
 warned_x=false
 for seg in "${segments[@]}"; do
+  _deadline
   # Trim whitespace + subshell parens.
   seg="$(sed -E 's/^[[:space:](]+//; s/[)[:space:]]+$//' <<<"$seg")"
   [ -z "$seg" ] && continue
@@ -195,6 +240,7 @@ for seg in "${segments[@]}"; do
     fi
     # shellcheck disable=SC2086 # word-splitting the match-copy into tokens is the point (set -f is on)
     for tok in $mseg; do
+      _deadline
       # shellcheck disable=SC2088,SC2016 # literal '~' / '$HOME' TOKENS in scanned command text are exactly what D3 matches
       case "$tok" in
         /|/.|'/*'|'~'|'~/'|'$HOME'|'$HOME/'|'${HOME}'|'${HOME}/'|"$HOME"|"$HOME/")
@@ -277,6 +323,7 @@ for seg in "${segments[@]}"; do
     seen_merge=false; expect_val=false
     # shellcheck disable=SC2086 # word-splitting the match-copy into tokens is the point (set -f is on)
     for tok in $mseg; do
+      _deadline
       if ! $seen_merge; then [ "$tok" = "merge" ] && seen_merge=true; continue; fi
       if $expect_val; then expect_val=false; continue; fi
       # SAD-258 — this value-taking-flag list is a STATIC MIRROR of gh pr merge's
@@ -323,6 +370,7 @@ for seg in "${segments[@]}"; do
     targets_main=false; deletes_main=false
     # shellcheck disable=SC2086 # word-splitting the match-copy is the point (set -f is on)
     for tok in $mseg; do
+      _deadline
       if ! $after_push; then [ "$tok" = "push" ] && after_push=true; continue; fi
       tok="${tok#+}"   # force-refspec syntax (+main, +HEAD:main) — strip for analysis
       case "$tok" in
