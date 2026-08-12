@@ -423,7 +423,12 @@ if [ -f "$PP" ]; then
   printf 'refs/heads/f abc refs/heads/f2 def\nrefs/heads/f abc refs/heads/main def\n' | bash "$PP" >/dev/null 2>&1; rc=$?
   if [ "$rc" = "1" ]; then echo "PASS  pre-push multi-ref push: main line caught"; pass=$((pass+1)); else echo "FAIL  pre-push multi-ref (rc=$rc)"; fail=$((fail+1)); fi
 else
-  echo "SKIP  .githooks/pre-push not present"
+  # NOT a SKIP. `install.sh` ships `githooks/pre-push` -> the target's
+  # `.githooks/pre-push`, so any target carrying this suite carries the hook too:
+  # its absence is a broken install, not an optional component. A silent SKIP here
+  # drops 5 assertions, which an assertion-floor check catches only if the floor
+  # happens to sit exactly at the measured count.
+  echo "FAIL  .githooks/pre-push not present at $PP — install.sh ships it, so this is a broken install, and skipping would silently drop 5 assertions"; fail=$((fail+1))
 fi
 
 echo "== lint-on-edit.sh =="
