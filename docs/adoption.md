@@ -71,8 +71,9 @@ deliberate: homoglyph and bidi-override characters read as innocuous to a human 
 behave differently to a model.
 
 ⚠ **The charset and length limits do not, and cannot, fully close prompt injection** — a short
-imperative fits comfortably within any charset that also admits real project names. They close
-shell breakout and comment termination, which they do provably. The honest boundary: a config
+imperative fits comfortably within any charset that also admits real project names. The
+**charset** closes shell breakout and comment termination, which it does provably; the length
+cap contributes nothing to either and only reduces the payload budget. The honest boundary: a config
 you wrote yourself is in your own trust boundary, since you could edit `agents/radar.md`
 directly anyway. The case these guards exist for is running `--config` against **a config you
 did not write**. Treat a third-party config as untrusted input and read it first.
@@ -196,7 +197,7 @@ reference instance's real config; copy and edit it. Key by key:
 | `git.mergeMethod` | runtime | funnel merge method (`squash`) |
 | `git.worktreeRoot` | docs | where per-issue worktrees live |
 | `git.copyIntoWorktree` | docs | gitignored per-machine files each worktree needs |
-| `ci.requiredCheck` | `{{REQUIRED_CHECK}}` + runtime | exact check name the funnel's G2 requires `SUCCESS` |
+| `ci.requiredCheck` | runtime only | exact check name the funnel's G2 requires `SUCCESS`. ⚠ `{{REQUIRED_CHECK}}` is **not currently substituted into any shipped file** — `land-pr.sh` reads this key at runtime. The placeholder is validated against future use; see the validation table above. |
 | `ci.localGate` | docs | the command an agent runs locally before pushing |
 | `ci.lintOnEdit` | runtime (`lint-on-edit.sh`) | lint command per Edit/Write (`$FILE` = edited file); `null` = no-op |
 | `review.docsTierPatterns` | runtime | globs; a PR is docs-tier only if ALL files match |

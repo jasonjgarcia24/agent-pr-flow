@@ -420,7 +420,7 @@ fi
 _assert_extracted() { # $1 = label  $2 = extracted text  $3 = a value that MUST appear
   if ! grep -qxF -- "$3" <<<"$2"; then
     bad "$1: extraction broke — the row(s) below would pass vacuously" \
-        "expected '\''$3'\'' among $(grep -c . <<<"$2") entries"
+        "expected '$3' among $(grep -c . <<<"$2") entries"
     return 1
   fi
   return 0
@@ -441,15 +441,19 @@ _assert_extracted() { # $1 = label  $2 = extracted text  $3 = a value that MUST 
 # span: the charset makes containment unbreakable and the delimiter provides it. Both
 # halves are needed and this row pins the half that had no test.
 _sinks=$(sed -n 's/^  "\([^|]*\)|.*/\1/p' "$ROOT/install.sh")
-_assert_extracted "sink" "$_sinks" "agents/radar.md"
+# Consume the return: without this the row below still emits its PASS beside the
+# helper's FAIL, asserting the control is pinned while asserting the check that pins
+# it is broken. Suite goes red either way; this stops the output contradicting itself.
+if _assert_extracted "sink" "$_sinks" "agents/radar.md"; then
 _undelim=$(while IFS= read -r rel; do
     [ -f "$ROOT/$rel" ] || continue
     sed 's/`[^`]*`//g' "$ROOT/$rel" | grep -n '{{TEAM}}\|{{PROJECT}}' | sed "s|^|$rel:|"
   done <<<"$_sinks")
-if [ -z "$_undelim" ]; then
-  ok "sink: every {{TEAM}}/{{PROJECT}} render sits inside a code span"
-else
-  bad "sink: {{TEAM}}/{{PROJECT}} renders outside a code span — injection mitigation lost" "$_undelim"
+  if [ -z "$_undelim" ]; then
+    ok "sink: every {{TEAM}}/{{PROJECT}} render sits inside a code span"
+  else
+    bad "sink: {{TEAM}}/{{PROJECT}} renders outside a code span — injection mitigation lost" "$_undelim"
+  fi
 fi
 
 # ----------------------------- case 9c: THIS repo's tier map, per path
@@ -485,6 +489,16 @@ _doc_ere="$(_ere_of '.review.docsTierPatterns')"
 # `security` rows below would pass vacuously. Only the LICENSE->code and two docs rows
 # would redden. That property is load-bearing and undocumented, so someone pruning the
 # "uninteresting" rows could silently make this whole block vacuous (Watson, PR #9).
+# ⚠ DELIBERATELY NOT _assert_extracted, and the reason is the assertion shape, not
+# caution. This block's 18 per-path rows ARE its positive control: Barb measured a
+# PARTIAL _sec_ere (non-empty, reduced to one pattern) and 14 tier rows redden. The
+# only hole is the FULLY EMPTY case, where `grep -qE ""` matches everything and the
+# rows invert to vacuous passes — which is exactly what this -z guard catches.
+# The sink row needed the helper because its only assertion is NEGATIVE ("nothing
+# renders undelimited"), and an empty input set satisfies a negative assertion
+# trivially, with no positive rows to fall back on. Different assertion, different
+# guard. _sec_ere is also a single alternation string, not a newline-separated list,
+# so grep -qxF has nothing to match whole-line against.
 if [ -z "$_sec_ere" ] || [ -z "$_doc_ere" ]; then
   bad "tier map: glob_to_ere extraction failed — every security row below would pass vacuously" "sec=${#_sec_ere} doc=${#_doc_ere}"
 fi
