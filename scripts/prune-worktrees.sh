@@ -52,7 +52,35 @@ issue_id_for() {
   #
   # `grep -i` makes the rendered {{ISSUE_KEY}} match either case in a branch name,
   # and `-o` echoes the branch's own spelling, which `tr` then normalizes up.
-  id=$(grep -ioE '{{ISSUE_KEY}}-[0123456789]+' <<<"$branch" | head -1 | tr '[:lower:]' '[:upper:]')
+  # ⚠ READ AT RUNTIME, NEVER RENDERED. This line used to carry a literal
+  # {{ISSUE_KEY}} placeholder, which install.sh substituted raw into the middle
+  # of a single-quoted grep ERE. An issueKey containing a single quote closed the
+  # string literal and the remainder executed as shell — proven end-to-end against
+  # the real installer (Barb, PR #9): `SAD'; id > /tmp/x; :'` yielded arbitrary
+  # command execution in every adopter, on the routine /land close-out step, in a
+  # generated file reviewers skim as boilerplate. install.sh validates exactly one
+  # config value (CODE_TIER_POLICY); the other six substitute raw.
+  #
+  # Every sibling script — land-pr.sh, all three hooks, githooks/pre-push,
+  # setup-repo.sh — is placeholder-free and reads config through jq at runtime.
+  # land-pr.sh even passes the check name to jq as --arg DATA for exactly this
+  # reason. This script was the bundle's only config-into-executable
+  # interpolation; it now follows the same convention.
+  #
+  # The key is used as grep DATA via -e, never as pattern source, so no value can
+  # reach the shell as code. Anchoring is preserved by building the ERE from the
+  # quoted key at runtime rather than by substitution at install time.
+  local key
+  key="$(jq -r '.tracker.issueKey // empty' "$REPO_ROOT/.claude/workflow.config.json" 2>/dev/null)"
+  # Fail CLOSED on a missing//malformed key: an empty or non-alphanumeric key
+  # would otherwise build an ERE matching every branch. Allowlist the charset —
+  # do not enumerate metacharacters to reject (SAD-546's lesson).
+  case "$key" in
+    ""|*[!A-Za-z0-9_]*)
+      echo "prune-worktrees: FAIL — tracker.issueKey missing or invalid (allowed: A-Z a-z 0-9 _)" >&2
+      echo "-"; return 1 ;;
+  esac
+  id=$(grep -ioE -e "$key-[0123456789]+" <<<"$branch" | head -1 | tr '[:lower:]' '[:upper:]')
   echo "${id:--}"
 }
 

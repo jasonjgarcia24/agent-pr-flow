@@ -179,6 +179,56 @@ case "${VAL[CODE_TIER_POLICY]}" in
     exit 1 ;;
 esac
 
+# ---------- value validation for EVERY substituted key (Barb, PR #9) ----------
+# Every VAL[] below is substituted RAW into shipped files via render_stream's
+# `content="${content//"$pat"/"$val"}"`. Until now exactly one key was validated
+# (CODE_TIER_POLICY, above) and the rest were trusted implicitly. That was a real,
+# proven RCE: {{ISSUE_KEY}} rendered inside a single-quoted grep ERE in
+# prune-worktrees.sh, so `SAD'; id > /tmp/x; :'` closed the string literal and the
+# remainder executed as shell in every adopter, on the routine /land close-out step.
+#
+# prune-worktrees.sh no longer interpolates at all (it reads the key at runtime),
+# but validating here is the boundary fix rather than the site fix, and it covers
+# the two shapes a site fix cannot:
+#   - a NEWLINE terminates a rendered COMMENT, so the remainder becomes code — the
+#     surviving {{ISSUE_KEY}} occurrences in comments are only safe because of this;
+#   - TEAM / PROJECT / MCP_PREFIX render into commands/*.md and agents/radar.md,
+#     which are read as AGENT INSTRUCTIONS — prompt-injection surface, different
+#     blast radius, same untrusted source.
+#
+# ALLOWLIST the permitted charset; never enumerate metacharacters to reject. An
+# allowlist naming bad characters never converges against an open input space.
+_bad_val() {
+  echo "install.sh: FAIL — invalid $1 '$2' ($3); nothing was installed" >&2
+  exit 1
+}
+case "${VAL[ISSUE_KEY]}" in
+  ""|*[!A-Za-z0-9_]*) _bad_val "tracker.issueKey" "${VAL[ISSUE_KEY]}" "allowed: A-Z a-z 0-9 _" ;;
+esac
+case "${VAL[DEFAULT_BRANCH]}" in
+  ""|*[!A-Za-z0-9._/-]*) _bad_val "git.defaultBranch" "${VAL[DEFAULT_BRANCH]}" "allowed: A-Z a-z 0-9 . _ / -" ;;
+esac
+case "${VAL[MCP_PREFIX]}" in
+  *[!A-Za-z0-9_]*) _bad_val "tracker.mcpPrefix" "${VAL[MCP_PREFIX]}" "allowed: A-Z a-z 0-9 _" ;;
+esac
+# TEAM / PROJECT / REQUIRED_CHECK are human-facing strings and legitimately carry
+# spaces and punctuation (e.g. "install \u00b7 hooks \u00b7 land-pr"), so they cannot take a
+# tight charset. Bar only what breaks out of a rendered context: newlines (end a
+# comment), and the quote characters that terminate a shell string literal.
+for _k in TEAM PROJECT REQUIRED_CHECK; do
+  case "${VAL[$_k]}" in
+    *"'"*|*'"'*|*'`'*|*'$'*|*'\'*)
+      _bad_val "$_k" "${VAL[$_k]}" "must not contain quotes, backslash, backtick or \$" ;;
+  esac
+  # ⚠ $'\n', NOT "$(printf '\n')". Command substitution STRIPS trailing newlines,
+  # so the latter yields the EMPTY STRING and `*""*` matches every value — a guard
+  # that rejects the exploit and every legitimate config alike. Caught only because
+  # the happy-path install was tested alongside the exploit.
+  case "${VAL[$_k]}" in
+    *$'\n'*|*$'\r'*) _bad_val "$_k" "<multiline>" "must be a single line" ;;
+  esac
+done
+
 # ---------- manifest: bundle-relative src | target-relative dst | mode ----------
 MANIFEST=(
   "hooks/pre-bash-safety.sh|.claude/hooks/pre-bash-safety.sh|x"
