@@ -199,7 +199,12 @@ esac
 # ALLOWLIST the permitted charset; never enumerate metacharacters to reject. An
 # allowlist naming bad characters never converges against an open input space.
 _bad_val() {
-  echo "install.sh: FAIL — invalid $1 '$2' ($3); nothing was installed" >&2
+  # %q the value. It has already failed an allowlist, so it can carry ANSI escapes
+  # into the operator's terminal — verified live: an issueKey holding \033[31m and an
+  # OSC title sequence emitted raw (Watson, PR #9). ⚠ I previously REPORTED this as
+  # done when it was not: the edit sat in a block whose assertion aborted, and I did
+  # not re-check before saying so.
+  printf 'install.sh: FAIL — invalid %s %q (%s); nothing was installed\n' "$1" "$2" "$3" >&2
   exit 1
 }
 case "${VAL[ISSUE_KEY]}" in
@@ -218,12 +223,29 @@ esac
 # issue you can reach" installed cleanly, landing 2 occurrences in .claude/agents/radar.md
 # and 5 in .claude/commands/issue.md -- files read as AGENT INSTRUCTIONS. Shell breakout
 # was blocked; prompt injection was not, which is the coverage the comment claimed.
-# The charset below admits "Sadiga" and "Endurance Logger" and nothing instruction-shaped.
+# ⚠ THE CHARSET ALONE DOES NOT CLOSE PROMPT INJECTION, and an earlier version of this
+# comment claimed it did ("admits Sadiga and Endurance Logger and nothing
+# instruction-shaped") — a confident false claim that would have ended the next
+# reviewer's inquiry. Letters, digits, spaces and periods ARE the vocabulary of an
+# injection payload. Watson's specific string was blocked by its COLON, nothing more;
+# Barb re-ran it colon-free at this head and it installed clean, landing 2 occurrences
+# in .claude/agents/radar.md and 5 in .claude/commands/issue.md — identical counts to
+# the denylist it replaced. The charset changed nothing for that attack.
+#
+# LENGTH is the bound that converges, because the hostile input space is natural
+# language and a name is short while an instruction is not. "Endurance Logger" is 16;
+# Barb's payload was 93. Charset AND length together make a meaningful payload
+# unfittable while admitting every real project name.
 for _k in TEAM PROJECT; do
   case "${VAL[$_k]}" in
     ""|*[!A-Za-z0-9\ ._-]*)
       _bad_val "$_k" "${VAL[$_k]}" "allowed: A-Z a-z 0-9 space . _ -" ;;
   esac
+  # Report the LENGTH, not the value: a 93-char prose payload echoed into the
+  # operator's terminal is itself a small injection surface.
+  if [ "${#VAL[$_k]}" -gt 48 ]; then
+    _bad_val "$_k" "<${#VAL[$_k]} chars>" "max 48 characters"
+  fi
   # $'\n', NOT "$(printf '\n')". Command substitution STRIPS trailing newlines, so the
   # latter is the EMPTY STRING and `*""*` matches every value -- a guard that rejects the
   # exploit and every legitimate config alike. Caught only by testing the happy path
