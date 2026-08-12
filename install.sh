@@ -260,8 +260,18 @@ esac
 # docs/adoption.md tells adopters to run: `install.sh --config <a config you did not
 # write>`. That is the case the guards below actually buy something for.
 #
-# The 48-char cap stays as cheap defense in depth. It roughly halves the payload budget
-# and costs nothing real -- "Endurance Logger" is 16.
+# WHY THE DELIMITER ACTUALLY HOLDS, which is the one property here worth relying on:
+# the charset above EXCLUDES THE BACKTICK, so a value cannot close the code span it is
+# rendered inside. The charset makes containment unbreakable; the delimiter provides it.
+# Neither half works alone, and that is the only claim in this block that survives
+# adversarial input (Watson verified it by trying to break it first).
+#
+# The 48-char cap stays as cheap defense in depth: it roughly halves the payload budget.
+# ⚠ It is NOT free, and an earlier version of this line said "costs nothing real". The
+# charset rejects `Core Platform (EU)`, `R&D` and `Frontend/Backend`; the cap rejects any
+# name over 48 chars. Those fail loudly at install with the allowed set named, and the
+# workaround is a rename -- but that is a real constraint on adopters, documented in
+# docs/adoption.md so it is met as prose rather than as a failed install.
 for _k in TEAM PROJECT; do
   case "${VAL[$_k]}" in
     ""|*[!A-Za-z0-9\ ._-]*)

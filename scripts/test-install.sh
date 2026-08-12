@@ -405,6 +405,30 @@ else
   bad "value validation: a {{VAR}} placeholder is interpolated into shell source" "$_src_ph"
 fi
 
+# ----------------------------- case 9b2: the SINK mitigation is pinned
+# ⚠ Backtick delimiting is now the ONLY control that mitigates instruction injection —
+# the charset and length guards are documented in install.sh as NOT converging on it.
+# Nothing tested it: Barb removed the backticks from radar.md's role sentence at the
+# previous head and the suite stayed 48/0. The mutation was invisible.
+#
+# Same argument Watson made for the tier-map non-vacuity guard, and the delimiting is
+# more load-bearing than the tier rows. This is SOURCE-side (like _src_ph) and derives
+# its file list from install.sh's MANIFEST rather than a glob — a glob is what missed
+# references/pm/linear.md.tmpl, the fourth sink, in the first place.
+#
+# The charset allowlist excludes the backtick, so a value can never close its own code
+# span: the charset makes containment unbreakable and the delimiter provides it. Both
+# halves are needed and this row pins the half that had no test.
+_undelim=$(while IFS= read -r rel; do
+    [ -f "$ROOT/$rel" ] || continue
+    sed 's/`[^`]*`//g' "$ROOT/$rel" | grep -n '{{TEAM}}\|{{PROJECT}}' | sed "s|^|$rel:|"
+  done < <(sed -n 's/^  "\([^|]*\)|.*/\1/p' "$ROOT/install.sh"))
+if [ -z "$_undelim" ]; then
+  ok "sink: every {{TEAM}}/{{PROJECT}} render sits inside a code span"
+else
+  bad "sink: {{TEAM}}/{{PROJECT}} renders outside a code span — injection mitigation lost" "$_undelim"
+fi
+
 # ----------------------------- case 9c: THIS repo's tier map, per path
 # ⚠ Nothing else exercises .claude/workflow.config.json. test-land-pr.sh's headline
 # assertion is `config-vs-fallback tier identity` — it requires the config-driven

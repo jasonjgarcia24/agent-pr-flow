@@ -42,6 +42,41 @@ bash install.sh --target /path/to/your-repo --config your-workflow.config.json -
 5. **chmod +x** on the hooks/githooks/scripts, then runs the target's `tools/dev/setup-repo.sh` and
    propagates its exit status.
 
+### Config values are validated — plan your team and project names
+
+`install.sh` substitutes seven config values into shipped files, and several of those files
+are read by agents as **instructions** (`agents/radar.md`, `commands/issue.md`,
+`references/pm/linear.md`). Values are therefore validated at install time and a bad one
+**aborts the install with nothing written** — it does not warn and continue.
+
+| Key | Allowed |
+|---|---|
+| `tracker.issueKey` | `A-Z a-z 0-9 _` — non-empty |
+| `tracker.mcpPrefix` | `A-Z a-z 0-9 _` |
+| `git.defaultBranch` | `A-Z a-z 0-9 . _ / -` |
+| `tracker.team`, `tracker.project` | `A-Z a-z 0-9`, space, `.` `_` `-` — **max 48 characters** |
+| `ci.requiredCheck` | any single line without quotes, backslash, backtick or `$` |
+
+**Team and project names are the constrained ones, and it is worth knowing before you start.**
+`Core Platform (EU)`, `R&D` and `Frontend/Backend` are rejected — parentheses, ampersands and
+slashes are not in the set, and neither is non-ASCII. Rename to `Core Platform EU`, `R and D`,
+`Frontend-Backend`. The install fails loudly and names the allowed set, so you will not be
+guessing; this is here so you meet the constraint as documentation rather than as a failed run.
+
+**Why the restriction exists.** These two values render into files an agent reads as
+instructions, so the risk is not shell injection but *prompt* injection. They are additionally
+rendered inside backticks at every site so the value parses as a literal name, and the charset
+excludes the backtick so a value cannot close the span it sits in. Excluding non-ASCII is
+deliberate: homoglyph and bidi-override characters read as innocuous to a human reviewer and
+behave differently to a model.
+
+⚠ **The charset and length limits do not, and cannot, fully close prompt injection** — a short
+imperative fits comfortably within any charset that also admits real project names. They close
+shell breakout and comment termination, which they do provably. The honest boundary: a config
+you wrote yourself is in your own trust boundary, since you could edit `agents/radar.md`
+directly anyway. The case these guards exist for is running `--config` against **a config you
+did not write**. Treat a third-party config as untrusted input and read it first.
+
 **Idempotency:** re-running is safe. Byte-identical targets report `skip (unchanged)`; a target that
 differs gets a unified diff printed and is **kept** (exit 1) — pass `--force` to overwrite.
 
