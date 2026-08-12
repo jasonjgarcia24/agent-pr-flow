@@ -8,7 +8,7 @@ a `/issue` version and a separate Radar version. This is the single source of tr
 tracking works on Linear — CLAUDE.md only routes here.
 
 ## Platform target
-- **Team:** {{TEAM}} · **Project:** {{PROJECT}} · **Issue key:** `{{ISSUE_KEY}}-N`.
+- **Team:** `{{TEAM}}` · **Project:** `{{PROJECT}}` · **Issue key:** `{{ISSUE_KEY}}-N`.
 - Drive it via the **claude.ai Linear MCP** — `{{MCP_PREFIX}}save_issue` /
   `list_issues` / `get_issue` / `save_comment` / `list_issue_labels`. These are deferred MCP
   tools; if one isn't loaded, fetch it first with ToolSearch (e.g.
@@ -150,7 +150,7 @@ closed before <date>").
    (idempotent — a caller-supplied {{ISSUE_KEY}}-N that's no longer terminal should be dropped and flagged,
    not silently included).
 3. **Find or create the ledger document** — `list_documents` for one titled **"Deleted Issues
-   Ledger"** under team {{TEAM}}. If it exists, append; if not, create it with `save_document`
+   Ledger"** under team `{{TEAM}}`. If it exists, append; if not, create it with `save_document`
    (this is the one standing document — never create a new one per run).
 4. **Append one row per candidate** *before* reporting the list back, so the record survives even
    past the 30-day recovery window:
@@ -263,11 +263,11 @@ of record.
 ## Project-hygiene sweep (do this on every board audit)
 The GitHub↔Linear sync maps a repo → **team**, NOT → **project** — so feedback-originated issues
 (the app-feedback ones, "reported via … feedback" in the body, with a GitHub attachment) land in
-the **{{TEAM}} team with NO project**, and now also in the team's **Triage** queue (enabled
+the `{{TEAM}}` team with **NO project**, and now also in the team's **Triage** queue (enabled
 2026-07-05). Linear has no native "set project" automation (checked account + team
 `Workflows & automations` — status/close/archive only), so this is Radar's job. On any audit —
-and whenever asked to "manage triage" — sweep: `list_issues` team={{TEAM}} with **no project**
-(and/or in the **Triage** state), and for each that clearly belongs to the {{PROJECT}} app (all
+and whenever asked to "manage triage" — sweep: `list_issues` team=`{{TEAM}}` with **no project**
+(and/or in the **Triage** state), and for each that clearly belongs to the `{{PROJECT}}` app (all
 feedback-pipeline ones do): `save_issue` `project="{{PROJECT}}"` and, if it's sitting in
 **Triage**, accept it out by moving state → **Backlog**. Genuinely-ambiguous / off-project items
 stay in Triage — flag them, don't guess. (The durable fix is server-side — file to Linear's API

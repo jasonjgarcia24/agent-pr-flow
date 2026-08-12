@@ -4,7 +4,7 @@ argument-hint: [optional — "dry-run" to only report, or a specific worktree pa
 ---
 
 Sweep `.claude/worktrees/` and `<git.worktreeRoot>` for worktrees that are safe to remove: PR merged,
-tree clean, and (per {{ISSUE_KEY}}-418) the tied {{TEAM}} issue confirmed **Done**. This is the safety net for
+tree clean, and (per {{ISSUE_KEY}}-418) the tied `{{TEAM}}` issue confirmed **Done**. This is the safety net for
 worktrees the `/land` close-out never reached — crashed/interrupted sessions, work predating this
 automation, or manually-created worktrees. `/land`'s own close-out already runs this same flow for the
 worktree it just landed; this command is for everything else.

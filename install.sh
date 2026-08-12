@@ -232,10 +232,36 @@ esac
 # in .claude/agents/radar.md and 5 in .claude/commands/issue.md — identical counts to
 # the denylist it replaced. The charset changed nothing for that attack.
 #
-# LENGTH is the bound that converges, because the hostile input space is natural
-# language and a name is short while an instruction is not. "Endurance Logger" is 16;
-# Barb's payload was 93. Charset AND length together make a meaningful payload
-# unfittable while admitting every real project name.
+# ⚠ WHAT THESE TWO GUARDS DO AND DO NOT COVER. Three revisions of this block each
+# asserted coverage they did not have -- a denylist, then a charset ("nothing
+# instruction-shaped"), then a length cap ("makes a meaningful payload unfittable").
+# Each claim was disproved by the next reviewer, and the third was disproved by the
+# reviewer who recommended it. Stating the bound honestly instead:
+#
+# COVERED, provably, and pinned by rows in test-install.sh:
+#   - shell breakout: a quote reaching a rendered single-quoted ERE (the original RCE)
+#   - comment termination: a newline ending a rendered `#` line so the rest becomes code
+#
+# NOT COVERED: agent-instruction payloads. Letters, digits, spaces and periods are the
+# entire vocabulary of an instruction, so charset cannot converge; and a useful
+# imperative bottoms out near 16-32 chars while real project names run to ~30, so no
+# length threshold separates them either. Watson landed a 32-char payload using only
+# [A-Za-z0-9 .] that rendered ELEVEN times across three agent-instruction files.
+# DO NOT take another round tightening these numbers.
+#
+# The mitigation that changes the parse rather than the budget is STRUCTURAL and lives
+# at the sink: {{TEAM}}/{{PROJECT}} render inside BACKTICKS in every .md and .tmpl that
+# an agent reads, so the value presents as a literal name rather than as prose
+# continuing the surrounding sentence. That is not a guarantee either.
+#
+# TRUST BOUNDARY: workflow.config.json is operator-authored, and an operator who can
+# write it can already edit agents/radar.md directly -- so for the normal case this is
+# in-boundary and these guards are hygiene. The path worth naming is the one
+# docs/adoption.md tells adopters to run: `install.sh --config <a config you did not
+# write>`. That is the case the guards below actually buy something for.
+#
+# The 48-char cap stays as cheap defense in depth. It roughly halves the payload budget
+# and costs nothing real -- "Endurance Logger" is 16.
 for _k in TEAM PROJECT; do
   case "${VAL[$_k]}" in
     ""|*[!A-Za-z0-9\ ._-]*)
