@@ -33,12 +33,13 @@
       "codeTierPolicy is deliberately ABSENT: there is no meaningful 'code' tier in a",
       "repo with no application code, so a file matching neither list falls to the",
       "default rather than silently landing on CI alone.",
-      "Both layouts are listed on purpose. In THIS repo the machinery lives at hooks/, scripts/, commands/, agents/. In an ADOPTER the same files are installed under .claude/. A bundle repo should gate both: the source it ships and the install surface it owns. land-pr.sh's own G0 self-test also probes '.claude/hooks/_selftest', which hardcodes instance-#1's layout — filed separately; covering both layouts is correct on its own merits, not a way around that probe."
+      "Both layouts are listed on purpose. In THIS repo the machinery lives at hooks/, scripts/, commands/, agents/. In an ADOPTER the same files are installed under .claude/. A bundle repo should gate both: the source it ships and the install surface it owns. land-pr.sh's own G0 self-test also probes '.claude/hooks/_selftest', which hardcodes instance-#1's layout — filed separately; covering both layouts is correct on its own merits, not a way around that probe.",
+      "BOTH-LAYOUTS APPLIES TO ALL SEVEN PAIRS, not five. Source -> installed: hooks/ -> .claude/hooks/, commands/ -> .claude/commands/, agents/ -> .claude/agents/, references/ -> .claude/references/, settings.fragment.json -> .claude/settings.json, scripts/ -> tools/dev/, githooks/ -> .githooks/. The last two were MISSING in the first draft, and tools/dev/** and .githooks/** are strict WEAKENINGS against the hardcoded fallback this config replaces -- land-pr.sh and pre-push would have tiered as code, i.e. no Barb (Watson, PR #9). ci/** was missing outright and ci/main-guard.yml exists in the tree today: the server-side push-provenance detector would have landed Barb-less.",
+      "LICENSE is NOT in docsTierPatterns on purpose. It was, and that was the single place this config weakened anything (code -> docs, i.e. reviewer-required -> CI-alone). Relicensing a bundle every adopter vendors is worth one Watson read (Barb, PR #9)."
     ],
     "docsTierPatterns": [
       "*.md",
       "docs/**",
-      "LICENSE",
       "SECURITY.md",
       ".gitignore"
     ],
@@ -60,7 +61,10 @@
       ".claude/commands/**",
       ".claude/agents/**",
       ".claude/references/**",
-      ".claude/settings.json"
+      ".claude/settings.json",
+      "ci/**",
+      "tools/dev/**",
+      ".githooks/**"
     ],
     "verdicts": {
       "reviewer": {
