@@ -50,7 +50,9 @@
       ".mcp.json",
       ".claude/workflow.config.json",
       ".claude/workflow.config.**",
-      "server/**"
+      "server/**",
+      "local.properties",
+      "google-services.json"
     ],
     "codeTierPolicy": "reviewer",
     "verdicts": {
