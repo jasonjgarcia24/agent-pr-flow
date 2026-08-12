@@ -74,19 +74,29 @@ probing, install/verify flows) concurrently against one serial.
 **Tier resolution** (file patterns live in `.claude/workflow.config.json` — single source; the
 lists below are the semantics, not a second copy):
 
-- **security** — if ANY changed file matches `review.securityTierPatterns` (workflows, gradle,
-  manifests, network/feedback code, and the self-protection set: `.claude/settings.json`,
-  `.claude/hooks/**`, `.claude/commands/**`, `.claude/agents/**`, `.claude/workflow.config.json`,
-  `.claude/workflow.config.**`, `.githooks/**`, `tools/dev/land-pr.sh`, `tools/dev/setup-repo.sh`,
-  `.mcp.json` — changing the gates requires Barb). Commands and agent charters are gated as **whole directories** (SAD-546):
-  a filename allowlist is defeated by a rename, a sibling, a namespaced path, or a newly added
-  destructive command, because the residual tier of those directories is `docs`.
+- **security** — if ANY changed file matches `review.securityTierPatterns` (`.github/**`, gradle —
+  including `buildSrc/**`, `gradle/**` and `**/*.gradle` — manifests, network/feedback code, and
+  the self-protection set: `.claude/**`, `.githooks/**`,
+  `tools/**`, `gradlew`, `gradlew.bat`, `.mcp.json` — changing the gates requires Barb). These are
+  **whole directories**, never filename allowlists (SAD-546): an allowlist is defeated by a rename,
+  a sibling, a namespaced path, or a newly added destructive file, because the residual tier of
+  those directories is `docs`.
+
+  Also security tier in the reference instance, for the same "the gate protects itself" reason:
+  the privacy- and key-sensitive app surfaces beyond `network/**` + `feedback/**`, and the
+  gitignored build inputs (`local.properties`, `google-services.json`) that a landing can clobber.
+  Those entries are instance-shaped; the fenced RECORD below is authoritative, not this prose.
 
   > **SAD-285 lockstep.** This paragraph, `.claude/workflow.config.json`, the hardcoded fallback
   > in `tools/dev/land-pr.sh`, and the bundle's `templates/workflow.config.example.json` all state
   > this same rule and **must be edited together**. `tools/dev/test-land-pr.sh` asserts both the
-  > config-vs-fallback identity and that this paragraph names every `.claude/` security pattern —
-  > it went red on this paragraph once already.
+  > config-vs-fallback identity and that the fenced record below names **every** security pattern
+  > verbatim — not just the `.claude/` ones — in both directions. It went red on this paragraph
+  > once already.
+  >
+  > ⚠ The fourth surface is in ANOTHER REPOSITORY (the bundle, or this instance, depending which
+  > side you are reading), and no test in either can read the other. "Must be edited together" is
+  > an instruction there, not a gate — see SAD-682.
 
   **The exact patterns, verbatim** — the prose above is the RATIONALE and uses `…` elisions; this
   is the RECORD. `tools/dev/test-land-pr.sh` asserts SET EQUALITY between the fenced block below
@@ -108,32 +118,33 @@ lists below are the semantics, not a second copy):
   `review.securityTierPatterns` must edit this fence in the same change or their own
   `test-land-pr.sh` goes red — which is the lockstep working, not a bug in the install.
 
-```
-.github/**
-buildSrc/**
-**/*.gradle
-**/*.gradle.kts
-gradle/**
-gradle.properties
-**/AndroidManifest.xml
-app/src/main/java/com/enduranceloggr/app/network/**
-app/src/main/java/com/enduranceloggr/app/feedback/**
-gradlew
-gradlew.bat
-.claude/**
-.githooks/**
-tools/**
-.mcp.json
-app/src/main/java/com/enduranceloggr/app/nano/**
-app/src/main/java/com/enduranceloggr/app/voice/**
-app/src/main/java/com/enduranceloggr/app/map/**
-app/src/main/java/com/enduranceloggr/app/ui/summary/CourseMapWeb.kt
-server/**
-local.properties
-google-services.json
-```
+  ```
+  .github/**
+  buildSrc/**
+  **/*.gradle
+  **/*.gradle.kts
+  gradle/**
+  gradle.properties
+  **/AndroidManifest.xml
+  app/src/main/java/com/enduranceloggr/app/network/**
+  app/src/main/java/com/enduranceloggr/app/feedback/**
+  gradlew
+  gradlew.bat
+  .claude/**
+  .githooks/**
+  tools/**
+  .mcp.json
+  app/src/main/java/com/enduranceloggr/app/nano/**
+  app/src/main/java/com/enduranceloggr/app/voice/**
+  app/src/main/java/com/enduranceloggr/app/map/**
+  app/src/main/java/com/enduranceloggr/app/ui/summary/CourseMapWeb.kt
+  server/**
+  local.properties
+  google-services.json
+  ```
 - **docs** — only if ALL changed files match `review.docsTierPatterns` (`*.md`, `docs/**`,
-  `design/**`, `tasks/**`, `.gitignore`, the PR template, `acceptance-evidence/**`).
+  `design/**`, `tasks/**`, `.gitignore`, `acceptance-evidence/**`). Note the PR template is
+  NOT here — `.github/**` makes it security tier.
 - **code** — everything else.
 
 **Gate per tier:** docs = CI alone · code = CI + Watson *(unless `review.codeTierPolicy:
