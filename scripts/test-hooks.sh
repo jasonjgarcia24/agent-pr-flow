@@ -20,8 +20,25 @@ set -u
 # results. For a suite whose entire value is RED-checkability, a false GREEN is the
 # worst available failure mode, so the tree under test is pinned to the tree the
 # script was loaded from.
-ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)" || exit 1
+#
+# ⚠ CANONICALISE FIRST — `${BASH_SOURCE[0]}` is the path AS INVOKED, not the real
+# path, so reaching this script through a SYMLINK resolves `dirname` to the
+# SYMLINK'S directory, i.e. some other checkout: the same wrong-tree audit one
+# door over. Reproduced during review of the downstream mirror (a symlink in one
+# repo pointing at another resolved ROOT to the wrong repo). Both fallbacks are
+# deliberate — `readlink -f` is GNU, `realpath` covers the rest, and the raw path
+# is the last resort.
+# ⚠ NOT closed by this line: `core.worktree` / `GIT_WORK_TREE` redirect
+# `git rev-parse` whatever path it is handed. Unchanged from the pre-fix form,
+# and out of reach of a path canonicalisation — stated so "pinned to its own
+# tree" is not read as covering it.
+_SELF="$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || realpath -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+ROOT="$(git -C "$(dirname -- "$_SELF")" rev-parse --show-toplevel)" || exit 1
+cd "$ROOT" || exit 1
 H="$ROOT/.claude/hooks"
+# Fail LOUDLY on a missing hooks directory rather than reporting N identical
+# rc=127 rows and leaving the reader to infer the cause.
+[ -d "$H" ] || { echo "FATAL  hooks directory not found at $H — refusing to report a result"; exit 1; }
 pass=0; fail=0; retried=0
 
 mk() { # $1 = command, $2 = cwd (default repo root)
