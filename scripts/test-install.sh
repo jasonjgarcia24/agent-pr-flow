@@ -392,6 +392,65 @@ else
   bad "value validation: a {{VAR}} placeholder is interpolated into shell source" "$_src_ph"
 fi
 
+# ----------------------------- case 9c: THIS repo's tier map, per path
+# ⚠ Nothing else exercises .claude/workflow.config.json. test-land-pr.sh's headline
+# assertion is `config-vs-fallback tier identity` — it requires the config-driven
+# classification to EQUAL the hardcoded instance-#1 fallback, which only holds for a
+# config that is instance #1, and so cannot run against this repo's own config
+# (Watson, PR #9). CI passes only because its scratch target is seeded from
+# templates/workflow.config.example.json, i.e. it validates the TEMPLATE, not the
+# config under review. That left "does this config weaken a gate?" unanswered by any
+# automation — and it did weaken two: tools/dev/** and .githooks/** classified `code`
+# where the fallback said `security`, so land-pr.sh and pre-push were reviewable with
+# no Barb.
+#
+# These rows are per-path and instance-owned: each names a real path in THIS repo and
+# the tier it must have. They reuse land-pr.sh's own glob_to_ere so the harness cannot
+# drift from the classifier it is asserting about.
+_ere_of() { # $1 = jq array path -> combined ERE, via land-pr.sh's own converter
+  ( set +u
+    eval "$(sed -n '/^glob_to_ere() {/,/^}/p' "$ROOT/scripts/land-pr.sh")"
+    die() { echo "glob_to_ere refused: $2" >&2; exit 1; }
+    local out="" g
+    while IFS= read -r g; do
+      [ -n "$g" ] || continue
+      out="${out:+$out|}$(glob_to_ere "$g")"
+    done < <(jq -r "$1[]" "$ROOT/.claude/workflow.config.json")
+    printf '%s\n' "$out" )
+}
+_sec_ere="$(_ere_of '.review.securityTierPatterns')"
+_doc_ere="$(_ere_of '.review.docsTierPatterns')"
+_tier_of() { # security wins over docs — mirrors land-pr.sh's precedence
+  if grep -qE "$_sec_ere" <<<"$1"; then echo security
+  elif grep -qE "$_doc_ere" <<<"$1"; then echo docs
+  else echo code; fi
+}
+_tier_case() { # $1 = path  $2 = expected tier
+  local got; got="$(_tier_of "$1")"
+  if [ "$got" = "$2" ]; then ok "tier map: $1 -> $2"
+  else bad "tier map: $1 must be $2" "got $got"; fi
+}
+# Paths that exist in this repo today.
+_tier_case "ci/main-guard.yml"                      security
+_tier_case "install.sh"                             security
+_tier_case "scripts/land-pr.sh"                     security
+_tier_case "scripts/prune-worktrees.sh"             security
+_tier_case "hooks/pre-bash-safety.sh"               security
+_tier_case "githooks/pre-push"                      security
+_tier_case "commands/land.md"                       security
+_tier_case "agents/radar.md"                        security
+_tier_case "templates/workflow.config.example.json" security
+_tier_case ".github/workflows/ci.yml"               security
+_tier_case ".claude/workflow.config.json"           security
+_tier_case "LICENSE"                                code
+_tier_case "docs/adoption.md"                       docs
+_tier_case "README.md"                              docs
+# Installed layout — vacuous today, live the moment this repo self-installs.
+_tier_case "tools/dev/land-pr.sh"                   security
+_tier_case ".githooks/pre-push"                     security
+_tier_case ".claude/hooks/pre-bash-safety.sh"       security
+_tier_case ".claude/commands/land.md"               security
+
 # ----------------------------- case 10: an out-of-set review.codeTierPolicy is rejected
 # land-pr.sh aborts a landing on a value outside the enum; install.sh used to render that
 # same value into workflow.md as though it were policy. Both must reject it.
