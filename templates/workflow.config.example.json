@@ -50,7 +50,9 @@
       "app/src/main/java/com/enduranceloggr/app/voice/**",
       "app/src/main/java/com/enduranceloggr/app/map/**",
       "app/src/main/java/com/enduranceloggr/app/ui/summary/CourseMapWeb.kt",
-      "server/**"
+      "server/**",
+      "local.properties",
+      "google-services.json"
     ],
     "codeTierPolicy": "reviewer",
     "verdicts": {
