@@ -87,6 +87,49 @@ lists below are the semantics, not a second copy):
   > this same rule and **must be edited together**. `tools/dev/test-land-pr.sh` asserts both the
   > config-vs-fallback identity and that this paragraph names every `.claude/` security pattern —
   > it went red on this paragraph once already.
+
+  **The exact patterns, verbatim** — the prose above is the RATIONALE and uses `…` elisions; this
+  is the RECORD. `tools/dev/test-land-pr.sh` asserts SET EQUALITY between the fenced block below
+  and `review.securityTierPatterns`, in both directions, so the list can neither under- nor
+  over-describe the gate.
+
+  It is a FENCED BLOCK, and that is load-bearing rather than cosmetic. Two earlier shapes of this
+  assertion were falsifiable: the config→prose half grepped the whole §5 window, so deleting a
+  pattern from the record left both rows green whenever that string also survived in the
+  rationale prose above; and the prose→config half read a range anchored on the list's first and
+  last ENTRIES, so a fictional pattern added immediately above the first or below the last — the
+  likelier edit, since those lines are full — fell outside the range and passed. A fence has
+  delimiters that do not depend on the content they wrap, and one entry per line means nothing
+  can hide beside a separator. (Both leaks measured green before the fix; Watson, PR #547.)
+
+  ⚠ **In the BUNDLE this block is a template**, rendered into every adopter's
+  `.claude/references/pm/workflow.md` by `install.sh`. It carries the same list as
+  `templates/workflow.config.example.json`, and an adopter who edits their
+  `review.securityTierPatterns` must edit this fence in the same change or their own
+  `test-land-pr.sh` goes red — which is the lockstep working, not a bug in the install.
+
+```
+.github/**
+buildSrc/**
+**/*.gradle
+**/*.gradle.kts
+gradle/**
+gradle.properties
+**/AndroidManifest.xml
+app/src/main/java/com/enduranceloggr/app/network/**
+app/src/main/java/com/enduranceloggr/app/feedback/**
+gradlew
+gradlew.bat
+.claude/**
+.githooks/**
+tools/**
+.mcp.json
+app/src/main/java/com/enduranceloggr/app/nano/**
+app/src/main/java/com/enduranceloggr/app/voice/**
+app/src/main/java/com/enduranceloggr/app/map/**
+app/src/main/java/com/enduranceloggr/app/ui/summary/CourseMapWeb.kt
+server/**
+```
 - **docs** — only if ALL changed files match `review.docsTierPatterns` (`*.md`, `docs/**`,
   `design/**`, `tasks/**`, `.gitignore`, the PR template, `acceptance-evidence/**`).
 - **code** — everything else.
