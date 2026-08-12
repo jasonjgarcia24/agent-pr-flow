@@ -15,13 +15,23 @@ LIST="$(mktemp)"; CFG_OUT="$(mktemp)"; FB_OUT="$(mktemp)"
 trap 'rm -f "$LIST" "$CFG_OUT" "$FB_OUT"' EXIT
 
 # Every tracked file + a fixed adversarial set (near-miss names, nested files).
+#
+# The fixed set carries every path an assertion below names, INCLUDING the ones the
+# reference instance happens to track (`tools/dev/land-pr.sh`, `docs/requirements.md`).
+# Leaning on `git ls-files` for those made the suite instance-coupled: in a scratch target
+# — or any repo that has not committed the installed files yet — the paths are absent, the
+# assertions fail, and the failure says "the funnel does not classify as security" when the
+# truth is "that path was never fed in". These assertions are about the PATTERNS, so the
+# input must not depend on what a given repo happens to track. `sort -u` dedupes against
+# `git ls-files` where the paths really are tracked.
 {
   git ls-files
   printf '%s\n' app/.gitignore XAndroidManifest.xml .claude/hooksx/evil.sh \
     docsx/a.txt tools/dev/land-pr.sh.orig server/.gitignore \
     server/app/routers/feedback.py xserver/notbackend.py \
     sub/dir/gradle.properties .claude/workflow.config.json \
-    .claude/workflow.config.d/nested.json .claude/workflow.config.yaml
+    .claude/workflow.config.d/nested.json .claude/workflow.config.yaml \
+    tools/dev/land-pr.sh docs/requirements.md
 } | sort -u > "$LIST"
 
 LAND_PR_TEST=1 LAND_PR_SELFTEST=1 tools/dev/land-pr.sh 0 < "$LIST" > "$CFG_OUT" \

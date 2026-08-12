@@ -28,3 +28,10 @@ Run the merge funnel for PR **$ARGUMENTS**:
      this misses). **You're almost always removing your OWN worktree here** — the script
      refuses self-removal (cwd inside the target path), so run it from the primary
      checkout or another worktree, not from the one being removed.
+   - **If `tools/dev/prune-worktrees.sh` is missing, the step is NOT done.** The bundle
+     installs it, so it should be there; a partial or hand-rolled install is the only way
+     it isn't. In that case do the removal by hand — confirm the PR is MERGED and the
+     worktree clean, then `git worktree remove <path>` + `git branch -d <branch>` — and
+     **say in your report that you fell back**. "The script wasn't there" is never a
+     reason to treat the worktree as cleaned up; a silently skipped close-out step is the
+     exact failure {{ISSUE_KEY}}-418 was filed about.

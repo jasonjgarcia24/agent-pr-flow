@@ -20,6 +20,9 @@ check, and a Claude Code environment (the hooks are Claude Code `PreToolUse`/`Po
 
 ```bash
 bash install.sh --target /path/to/your-repo --config your-workflow.config.json [--force] [--clobber-local]
+
+# preview first — classifies the whole manifest, writes nothing, skips the doctor:
+bash install.sh --target /path/to/your-repo --config your-workflow.config.json --check
 ```
 
 `install.sh`:
@@ -38,6 +41,42 @@ bash install.sh --target /path/to/your-repo --config your-workflow.config.json [
    is never overwritten, not even with `--force`.
 5. **chmod +x** on the hooks/githooks/scripts, then runs the target's `tools/dev/setup-repo.sh` and
    propagates its exit status.
+
+### Config values are validated — plan your team and project names
+
+`install.sh` substitutes config values into shipped files, and several of those files
+are read by agents as **instructions** (`agents/radar.md`, `commands/issue.md`,
+`references/pm/linear.md`). Values are therefore validated at install time and a bad one
+**aborts the install with nothing written** — it does not warn and continue.
+
+| Key | Allowed |
+|---|---|
+| `tracker.issueKey` | `A-Z a-z 0-9 _` — non-empty |
+| `tracker.mcpPrefix` | `A-Z a-z 0-9 _` |
+| `git.defaultBranch` | `A-Z a-z 0-9 . _ / -` — non-empty |
+| `tracker.team`, `tracker.project` | `A-Z a-z 0-9`, space, `.` `_` `-` — **max 48 characters** |
+| `ci.requiredCheck` | any single line without quotes, backslash, backtick or `$` — *validated but not currently substituted into any shipped file; guarded against future use* |
+
+**Team and project names are the constrained ones, and it is worth knowing before you start.**
+`Core Platform (EU)`, `R&D` and `Frontend/Backend` are rejected — parentheses, ampersands and
+slashes are not in the set, and neither is non-ASCII. Rename to `Core Platform EU`, `R and D`,
+`Frontend-Backend`. The install fails loudly and names the allowed set, so you will not be
+guessing; this is here so you meet the constraint as documentation rather than as a failed run.
+
+**Why the restriction exists.** These two values render into files an agent reads as
+instructions, so the risk is not shell injection but *prompt* injection. They are additionally
+rendered inside backticks at every site so the value parses as a literal name, and the charset
+excludes the backtick so a value cannot close the span it sits in. Excluding non-ASCII is
+deliberate: homoglyph and bidi-override characters read as innocuous to a human reviewer and
+behave differently to a model.
+
+⚠ **The charset and length limits do not, and cannot, fully close prompt injection** — a short
+imperative fits comfortably within any charset that also admits real project names. The
+**charset** closes shell breakout and comment termination, which it does provably; the length
+cap contributes nothing to either and only reduces the payload budget. The honest boundary: a config
+you wrote yourself is in your own trust boundary, since you could edit `agents/radar.md`
+directly anyway. The case these guards exist for is running `--config` against **a config you
+did not write**. Treat a third-party config as untrusted input and read it first.
 
 **Idempotency:** re-running is safe. Byte-identical targets report `skip (unchanged)`; a target that
 differs gets a unified diff printed and is **kept** (exit 1) — pass `--force` to overwrite.
@@ -158,7 +197,7 @@ reference instance's real config; copy and edit it. Key by key:
 | `git.mergeMethod` | runtime | funnel merge method (`squash`) |
 | `git.worktreeRoot` | docs | where per-issue worktrees live |
 | `git.copyIntoWorktree` | docs | gitignored per-machine files each worktree needs |
-| `ci.requiredCheck` | `{{REQUIRED_CHECK}}` + runtime | exact check name the funnel's G2 requires `SUCCESS` |
+| `ci.requiredCheck` | runtime only | exact check name the funnel's G2 requires `SUCCESS`. ⚠ `{{REQUIRED_CHECK}}` is **not currently substituted into any shipped file** — `land-pr.sh` reads this key at runtime. The placeholder is validated against future use; see the validation table above. |
 | `ci.localGate` | docs | the command an agent runs locally before pushing |
 | `ci.lintOnEdit` | runtime (`lint-on-edit.sh`) | lint command per Edit/Write (`$FILE` = edited file); `null` = no-op |
 | `review.docsTierPatterns` | runtime | globs; a PR is docs-tier only if ALL files match |
@@ -178,15 +217,45 @@ a mis-configured one is loud rather than silently wrong.
 
 ## Verify
 
-Two committed regression suites (installed to `tools/dev/`):
+Three regression suites. **Two of them run from an INSTALLED repo, not from the bundle** — they
+assert on `.claude/hooks/*` and `tools/dev/*`, so run from a bundle clone they fail every case with
+"No such file or directory". Install into a scratch target first (that is also what the bundle's own
+CI does, and it doubles as proof the manifest is complete):
 
-- **`test-hooks.sh`** — feeds synthetic hook payloads to the safety hooks and asserts exit codes
-  across the D/F/W rules, quoting/prefix-normalization bypasses, refspec spellings, and the secret
-  patterns. No command in its table is ever executed. Run it after any hook edit.
-- **`test-land-pr.sh`** — drives the funnel's self-test mode over every tracked path plus an
-  adversarial near-miss set and asserts the config-driven and fallback tier classifiers agree
-  exactly, and that the self-protection paths resolve to the security tier. Run it after any change
-  to the tier patterns or the funnel's tier logic.
+- **`test-install.sh`** — runs from the **bundle repo** (`bash scripts/test-install.sh`). Drives
+  install.sh's drift classification: ahead / diverged / dirty / forward / unknown, the atomicity of a
+  refusal, `--dry-run`'s inertness, `review.codeTierPolicy` validation, and that every artifact the
+  shipped commands reference actually installs. It **additionally owns three controls that live
+  nowhere else**, so a failure here is not cosmetic:
+  - **config-value validation** — that a hostile `issueKey`, `team` or `project` aborts the install
+    with nothing written, and that ordinary values still install (the happy-path row exists because
+    an over-tight guard rejecting *everything* looks identical to a working one against an exploit);
+  - **the sink-delimiting control** — that every `{{TEAM}}`/`{{PROJECT}}` render sits inside a code
+    span, which is the only mitigation for prompt injection into agent-instruction files;
+  - **this repo's own tier map** — the per-path rows are the *only* automation exercising
+    `.claude/workflow.config.json`, because `test-land-pr.sh`'s config-vs-fallback identity
+    assertion holds only for a config identical to instance #1 and so cannot run here.
+- **`test-hooks.sh`** (installed to `tools/dev/`) — feeds synthetic hook payloads to the safety hooks
+  and asserts exit codes across the D/F/W rules, quoting/prefix-normalization bypasses, refspec
+  spellings, and the secret patterns. No command in its table is ever executed. Run it after any hook
+  edit.
+- **`test-land-pr.sh`** (installed to `tools/dev/`) — drives the funnel's self-test mode over every
+  tracked path plus a fixed adversarial near-miss set, and asserts the config-driven and fallback
+  tier classifiers agree exactly and that the self-protection paths resolve to the security tier. Run
+  it after any change to the tier patterns or the funnel's tier logic.
+
+```bash
+bash scripts/test-install.sh                       # from the bundle repo
+
+T=$(mktemp -d); git -C "$T" init -q                # then, for the other two:
+bash install.sh --target "$T" --config templates/workflow.config.example.json
+( cd "$T" && bash tools/dev/test-hooks.sh && bash tools/dev/test-land-pr.sh )
+```
+
+**Preview an install before running it:** `install.sh --target <repo> --check` classifies the whole
+manifest, prints what each entry would do, and writes nothing. Worth doing on any target that has
+been edited locally — because a refusal is atomic, one AHEAD file blocks the entire install, and
+`--check` is the only way to see all of them in one pass rather than one re-run at a time.
 
 A live smoke test is simply: from an agent session, run a raw `gh pr merge` (should be blocked by
 F1), a push to the trunk (blocked by F2 / pre-push), and a benign command (should pass) — the block
@@ -196,8 +265,10 @@ messages confirm the hooks are wired.
 
 No uninstaller ships; removal is the mirror image of install:
 
-1. Delete the installed files: `.claude/hooks/*.sh`, `.claude/commands/{land,issue,linear-triage}.md`,
-   `.claude/agents/radar.md`, `.claude/references/pm/{workflow,linear}.md`, `tools/dev/{land-pr,setup-repo,test-hooks,test-land-pr}.sh`,
+1. Delete the installed files: `.claude/hooks/*.sh`,
+   `.claude/commands/{land,issue,linear-triage,prune-worktrees,laymans}.md`,
+   `.claude/agents/radar.md`, `.claude/references/pm/{workflow,linear}.md`,
+   `tools/dev/{land-pr,prune-worktrees,setup-repo,test-hooks,test-land-pr}.sh`,
    `.githooks/pre-push`, `.github/workflows/main-guard.yml`, `.claude/workflow.config.json`.
 2. Remove the bundle's keys from `.claude/settings.json` (the hook wiring under
    `hooks.PreToolUse`/`hooks.PostToolUse`, and `enabledMcpjsonServers` if the fragment added it).

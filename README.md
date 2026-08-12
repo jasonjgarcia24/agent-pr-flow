@@ -126,10 +126,11 @@ that always demands the strictest review — the control protects its own config
 ```
 hooks/          Claude Code safety hooks — the agent-Bash gate + secret tripwire + config-driven lint
 githooks/       the pre-push trunk guard
-scripts/        land-pr.sh (the funnel) · setup-repo.sh (the doctor) · test suites
+scripts/        land-pr.sh (the funnel) · setup-repo.sh (the doctor) ·
+                prune-worktrees.sh (merged-worktree cleanup) · test suites
 ci/             main-guard.yml (the server-side provenance detector)
 agents/         radar.md — the background PM agent that keeps the board honest
-commands/       /land · /issue · /linear-triage slash commands
+commands/       /land · /issue · /linear-triage · /prune-worktrees · /laymans
 references/     the canonical engineering-workflow reference + tracker platform reference (templated)
 templates/      workflow.config.example.json — one JSON file configures an instance
 settings.fragment.json   the hook wiring merged into the target repo's Claude settings

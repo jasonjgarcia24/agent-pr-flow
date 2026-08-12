@@ -1,0 +1,103 @@
+{
+  "_comment": [
+    "agent-pr-flow's OWN instance config — the bundle gating itself (SAD-652).",
+    "Without this file land-pr.sh falls back to instance-#1 hardcoded defaults, which",
+    "expect endurance-logger's CI job name and tier patterns. The result is a funnel",
+    "that cannot land its own PRs: G2 looks for a check that does not exist here.",
+    "templates/workflow.config.example.json stays the ADOPTER template and is",
+    "deliberately endurance-logger-shaped; this file is this repo's instance copy."
+  ],
+  "tracker": {
+    "platform": "linear",
+    "mcpPrefix": "mcp__claude_ai_Linear__",
+    "team": "Sadiga",
+    "project": "Endurance Logger",
+    "issueKey": "SAD"
+  },
+  "git": {
+    "defaultBranch": "main",
+    "mergeMethod": "squash",
+    "worktreeRoot": "~/Documents/agent-pr-flow-worktrees",
+    "copyIntoWorktree": []
+  },
+  "ci": {
+    "requiredCheck": "install · hooks · land-pr",
+    "localGate": "bash scripts/test-install.sh",
+    "lintOnEdit": null
+  },
+  "review": {
+    "_comment": [
+      "This repo IS the landing machinery, so the security tier is close to total by",
+      "design. Anything that installs, gates, or is installed as an agent instruction",
+      "is security tier. Only prose and licensing are docs tier.",
+      "codeTierPolicy is deliberately ABSENT: there is no meaningful 'code' tier in a",
+      "repo with no application code, so a file matching neither list falls to the",
+      "default rather than silently landing on CI alone.",
+      "Both layouts are listed on purpose. In THIS repo the machinery lives at hooks/, scripts/, commands/, agents/. In an ADOPTER the same files are installed under .claude/. A bundle repo should gate both: the source it ships and the install surface it owns. land-pr.sh's own G0 self-test also probes '.claude/hooks/_selftest', which hardcodes instance-#1's layout — filed separately; covering both layouts is correct on its own merits, not a way around that probe.",
+      "BOTH-LAYOUTS APPLIES TO ALL SEVEN PAIRS, not five. Source -> installed: hooks/ -> .claude/hooks/, commands/ -> .claude/commands/, agents/ -> .claude/agents/, references/ -> .claude/references/, settings.fragment.json -> .claude/settings.json, scripts/ -> tools/dev/, githooks/ -> .githooks/. The last two were MISSING in the first draft, and tools/dev/** and .githooks/** are strict WEAKENINGS against the hardcoded fallback this config replaces -- land-pr.sh and pre-push would have tiered as code, i.e. no Barb (Watson, PR #9). ci/** was missing outright and ci/main-guard.yml exists in the tree today: the server-side push-provenance detector would have landed Barb-less.",
+      "LICENSE is NOT in docsTierPatterns on purpose. It was, and that was the single place this config weakened anything (code -> docs, i.e. reviewer-required -> CI-alone). Relicensing a bundle every adopter vendors is worth one Watson read (Barb, PR #9)."
+    ],
+    "docsTierPatterns": [
+      "*.md",
+      "docs/**",
+      "SECURITY.md",
+      ".gitignore"
+    ],
+    "securityTierPatterns": [
+      "install.sh",
+      "scripts/**",
+      "hooks/**",
+      "githooks/**",
+      "commands/**",
+      "agents/**",
+      "references/**",
+      "templates/**",
+      "settings.fragment.json",
+      ".github/**",
+      ".claude/workflow.config.json",
+      ".claude/workflow.config.**",
+      ".mcp.json",
+      ".claude/hooks/**",
+      ".claude/commands/**",
+      ".claude/agents/**",
+      ".claude/references/**",
+      ".claude/settings.json",
+      "ci/**",
+      "tools/dev/**",
+      ".githooks/**"
+    ],
+    "verdicts": {
+      "reviewer": {
+        "marker": "watson-verdict",
+        "pass": "APPROVE"
+      },
+      "security": {
+        "marker": "barb-verdict",
+        "pass": "CLEARED"
+      }
+    }
+  },
+  "agents": {
+    "pm": "radar",
+    "committer": "hubert",
+    "reviewer": "watson",
+    "security": "barb",
+    "tests": "pepper",
+    "acceptance": "negev"
+  },
+  "verification": {
+    "_comment": "No device surface in this repo; the suites ARE the verification.",
+    "tiers": [
+      {
+        "name": "functional",
+        "surface": "scratch-install-target",
+        "parallel": true
+      }
+    ]
+  },
+  "docs": {
+    "todoSnapshot": null,
+    "workflowRef": "references/pm/workflow.md",
+    "historyDir": "docs/history"
+  }
+}

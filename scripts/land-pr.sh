@@ -173,7 +173,17 @@ elif [ "$dry_run" != "1" ] && [ "${LAND_PR_SELFTEST:-0}" != "1" ]; then
     echo "land-pr: WARN — config not committed anywhere; using the working-tree copy" >&2
   fi
 fi
+CFG_MISSING=0
 if [ ! -f "$CFG" ]; then
+  # ⚠ RECORDED, not merely warned. This used to be a lone stderr line, so stdout —
+  # the artifact agents paste and humans read — printed a fully authoritative gate
+  # table with no indication that every tier pattern came from ANOTHER repo's
+  # hardcoded map (Watson, PR #9). In agent-pr-flow the fallback happened to yield
+  # tier=security by luck (.github/workflows/ matched ci.yml); in a repo where none
+  # of the instance-#1 anchors match, the tier silently drops to code or docs and a
+  # real landing proceeds ungated. The row is emitted below, beside the gates, and a
+  # real landing refuses.
+  CFG_MISSING=1
   echo "land-pr: WARN — workflow.config.json missing; using hardcoded instance-#1 fallbacks" >&2
 fi
 cfg() { # $1 = jq path, $2 = fallback; empty/missing/null -> fallback
@@ -310,6 +320,14 @@ gate_fail() { # $1 = gate number, $2 = message
     die "$1" "$2"
   fi
 }
+
+# The tier map IS the gate. Every other pattern path in this script is fail-closed
+# (tier_pat dies on an empty or invalid pattern); a MISSING config was the one place
+# that fell back to another repo's patterns and carried on. --dry-run still reports,
+# so a bootstrapping adopter can see the whole table; a real landing refuses.
+if [ "$CFG_MISSING" = "1" ]; then
+  gate_fail 0 "no .claude/workflow.config.json — the tier map and required check would come from instance-#1 fallbacks, not this repo"
+fi
 
 # ---------- G1: PR state ----------
 pr_json="$(gh pr view "$pr" --json state,isDraft,headRefOid,title,body,headRefName 2>/dev/null)" || die 1 "PR #$pr not found"
