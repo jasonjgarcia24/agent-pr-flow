@@ -201,7 +201,7 @@ reference instance's real config; copy and edit it. Key by key:
 | `ci.localGate` | docs | the command an agent runs locally before pushing |
 | `ci.lintOnEdit` | runtime (`lint-on-edit.sh`) | lint command per Edit/Write (`$FILE` = edited file); `null` = no-op |
 | `review.docsTierPatterns` | runtime | globs; a PR is docs-tier only if ALL files match |
-| `review.securityTierPatterns` | runtime | globs; ANY match → security tier. Include the **self-protection set**: settings, hooks, commands, githooks, the funnel scripts, and the config file itself (`.claude/workflow.config.**`) |
+| `review.securityTierPatterns` | runtime | globs; ANY match → security tier. Include the **self-protection set** as WHOLE DIRECTORIES (`.claude/**`, `.githooks/**`, `tools/**`) — a filename allowlist is defeated by a rename or a sibling (SAD-546). ⚠ **Every entry must also appear in `.claude/references/pm/workflow.md` §5's fenced record**: `tools/dev/test-land-pr.sh` asserts set equality in both directions, so adding a pattern here without adding it there turns your suite red (that is the lockstep working — it names the missing entry) |
 | `review.verdicts.reviewer` | runtime | reviewer marker + passing verdict (e.g. `watson-verdict` / `APPROVE`) |
 | `review.verdicts.security` | runtime | security marker + passing verdict (e.g. `barb-verdict` / `CLEARED`) |
 | `agents.*` | docs / runtime | station → agent name; `null` disables that station's gate with a loud WARN |
